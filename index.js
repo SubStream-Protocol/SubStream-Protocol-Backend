@@ -3,13 +3,31 @@ require('dotenv').config();
 const cors = require('cors');
 const express = require('express');
 
+const { AppDatabase } = require('./src/db/appDatabase');
 const { loadConfig } = require('./src/config');
 const { CdnTokenService, TokenValidationError } = require('./src/services/cdnTokenService');
+const { CreatorActionService } = require('./src/services/creatorActionService');
+const { CreatorAuditLogService } = require('./src/services/creatorAuditLogService');
+const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
+const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
+const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
+const { getRequestIp } = require('./src/utils/requestIp');
 
+/**
+ * Create the Express application with injectable services for testing.
+ *
+ * @param {object} [dependencies={}] Optional service overrides.
+ * @returns {import('express').Express}
+ */
 function createApp(dependencies = {}) {
   const app = express();
   const config = dependencies.config || loadConfig();
+  const database = dependencies.database || new AppDatabase(config.database.filename);
+  const auditLogService = dependencies.auditLogService || new CreatorAuditLogService(database);
+  const creatorActionService =
+    dependencies.creatorActionService || new CreatorActionService(database, auditLogService);
+  const creatorAuthService = dependencies.creatorAuthService || new CreatorAuthService(config);
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
@@ -112,9 +130,125 @@ function createApp(dependencies = {}) {
     }
   });
 
+  app.patch('/api/creator/flow-rate', requireCreatorAuth(creatorAuthService), async (req, res) => {
+    if (!isPresent(req.body?.flowRate)) {
+      return res.status(400).json({ success: false, error: 'flowRate is required' });
+    }
+
+    try {
+      const result = creatorActionService.updateFlowRate({
+        creatorId: req.creator.id,
+        flowRate: normalizeScalar(req.body.flowRate),
+        currency: isPresent(req.body.currency) ? String(req.body.currency) : null,
+        ipAddress: getRequestIp(req),
+      });
+
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      return handleActionError(res, error);
+    }
+  });
+
+  app.patch(
+    '/api/creator/videos/:videoId/visibility',
+    requireCreatorAuth(creatorAuthService),
+    async (req, res) => {
+      if (!isPresent(req.body?.visibility)) {
+        return res.status(400).json({ success: false, error: 'visibility is required' });
+      }
+
+      try {
+        const result = creatorActionService.updateVideoVisibility({
+          creatorId: req.creator.id,
+          videoId: req.params.videoId,
+          visibility: String(req.body.visibility),
+          ipAddress: getRequestIp(req),
+        });
+
+        return res.status(200).json({ success: true, data: result });
+      } catch (error) {
+        return handleActionError(res, error);
+      }
+    },
+  );
+
+  app.patch(
+    '/api/creator/coop-splits/:splitId',
+    requireCreatorAuth(creatorAuthService),
+    async (req, res) => {
+      if (!req.body?.splits || !Array.isArray(req.body.splits) || req.body.splits.length === 0) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'splits must be a non-empty array' });
+      }
+
+      try {
+        const result = creatorActionService.updateCoopSplit({
+          creatorId: req.creator.id,
+          splitId: req.params.splitId,
+          splits: req.body.splits,
+          ipAddress: getRequestIp(req),
+        });
+
+        return res.status(200).json({ success: true, data: result });
+      } catch (error) {
+        return handleActionError(res, error);
+      }
+    },
+  );
+
+  app.get('/api/creator/audit-log', requireCreatorAuth(creatorAuthService), (req, res) => {
+    const logs = auditLogService.listByCreatorId(req.creator.id);
+    return res.status(200).json({ success: true, data: logs });
+  });
+
+  app.get('/api/creator/audit-log/export', requireCreatorAuth(creatorAuthService), (req, res) => {
+    const format = String(req.query.format || '').toLowerCase();
+
+    if (!['csv', 'pdf'].includes(format)) {
+      return res.status(400).json({
+        success: false,
+        error: 'format must be one of: csv, pdf',
+      });
+    }
+
+    const logs = auditLogService.listByCreatorId(req.creator.id);
+    const exportTimestamp = new Date().toISOString();
+
+    if (format === 'csv') {
+      const csv = buildAuditLogCsv(logs);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="creator-audit-log-${req.creator.id}.csv"`,
+      );
+      return res.status(200).send(csv);
+    }
+
+    const pdf = buildAuditLogPdf({
+      creatorId: req.creator.id,
+      exportedAt: exportTimestamp,
+      logs,
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="creator-audit-log-${req.creator.id}.pdf"`,
+    );
+    return res.status(200).send(pdf);
+  });
+
+  app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
+
   return app;
 }
 
+/**
+ * Read a bearer token from the request.
+ *
+ * @param {import('express').Request} req The current request.
+ * @returns {string|null}
+ */
 function extractToken(req) {
   const authHeader = req.headers.authorization || '';
 
@@ -123,6 +257,62 @@ function extractToken(req) {
   }
 
   return req.query.token || req.body?.token || null;
+}
+
+/**
+ * Build creator auth middleware from the configured auth service.
+ *
+ * @param {CreatorAuthService} creatorAuthService Authentication service.
+ * @returns {import('express').RequestHandler}
+ */
+function requireCreatorAuth(creatorAuthService) {
+  return (req, res, next) => {
+    const token = extractToken(req);
+
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Authentication required' });
+    }
+
+    try {
+      req.creator = creatorAuthService.verifyToken(token);
+      return next();
+    } catch (error) {
+      return res.status(401).json({ success: false, error: error.message });
+    }
+  };
+}
+
+/**
+ * Normalize scalar request values to strings for durable storage.
+ *
+ * @param {string|number|boolean} value The value to normalize.
+ * @returns {string}
+ */
+function normalizeScalar(value) {
+  return String(value).trim();
+}
+
+/**
+ * Check whether a value is present in a request body.
+ *
+ * @param {unknown} value Value to inspect.
+ * @returns {boolean}
+ */
+function isPresent(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+/**
+ * Send a consistent JSON error payload for creator actions.
+ *
+ * @param {import('express').Response} res The response object.
+ * @param {Error & {statusCode?: number}} error The thrown error.
+ * @returns {import('express').Response}
+ */
+function handleActionError(res, error) {
+  return res
+    .status(error.statusCode || 500)
+    .json({ success: false, error: error.message || 'Request failed' });
 }
 
 const app = createApp();

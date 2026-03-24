@@ -16,6 +16,8 @@ const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscript
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
+const { getRedisClient, closeRedisClient } = require('./src/config/redis');
+const { createRateLimiter } = require('./middleware/rateLimiter');
 
 /**
  * Create the Express application with injectable services for testing.
@@ -37,6 +39,19 @@ function createApp(dependencies = {}) {
 
   app.use(cors());
   app.use(express.json());
+
+  // Leaky-bucket rate limiting per wallet address (requires Redis).
+  if (dependencies.rateLimiter) {
+    app.use('/api', dependencies.rateLimiter);
+  } else if (process.env.REDIS_URL || process.env.REDIS_HOST) {
+    app.use('/api', createRateLimiter({
+      redis: getRedisClient(),
+      bucketCapacity: Number(process.env.RATE_LIMIT_CAPACITY || 60),
+      leakRatePerSecond: Number(process.env.RATE_LIMIT_LEAK_RATE || 1),
+      blockDurationSeconds: Number(process.env.RATE_LIMIT_BLOCK_SECONDS || 300),
+      sybilThreshold: Number(process.env.SYBIL_THRESHOLD || 3),
+    }));
+  }
 
   app.get('/', (req, res) => {
     res.json({
@@ -336,6 +351,19 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Leaky-bucket rate limiting per wallet address
+if (process.env.REDIS_URL || process.env.REDIS_HOST) {
+  const { createRateLimiter: createRL } = require('./middleware/rateLimiter');
+  const { getRedisClient: getRC } = require('./src/config/redis');
+  app.use(createRL({
+    redis: getRC(),
+    bucketCapacity: Number(process.env.RATE_LIMIT_CAPACITY || 60),
+    leakRatePerSecond: Number(process.env.RATE_LIMIT_LEAK_RATE || 1),
+    blockDurationSeconds: Number(process.env.RATE_LIMIT_BLOCK_SECONDS || 300),
+    sybilThreshold: Number(process.env.SYBIL_THRESHOLD || 3),
+  }));
+}
 
 // Routes
 app.use('/auth', require('./routes/auth'));

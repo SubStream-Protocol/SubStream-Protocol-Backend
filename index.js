@@ -338,6 +338,11 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
+app.use('/auth', require('./routes/auth'));
+app.use('/content', require('./routes/content'));
+app.use('/analytics', require('./routes/analytics'));
+app.use('/storage', require('./routes/storage'));
+app.use('/posts', require('./routes/posts'));
 app.use("/auth", require("./routes/auth"));
 app.use("/auth", require("./routes/stellarAuth"));
 app.use("/content", require("./routes/content"));
@@ -351,6 +356,12 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     version: "1.0.0",
     services: {
+      auth: 'active',
+      content: 'active',
+      analytics: 'active',
+      storage: 'active',
+      posts: 'active'
+    }
       auth: "active",
       content: "active",
       analytics: "active",
@@ -367,6 +378,13 @@ app.get("/", (req, res) => {
     contract: "CAOUX2FZ65IDC4F2X7LJJ2SVF23A35CCTZB7KVVN475JCLKTTU4CEY6L",
     version: "1.0.0",
     endpoints: {
+      auth: '/auth',
+      content: '/content',
+      analytics: '/analytics',
+      storage: '/storage',
+      posts: '/posts',
+      health: '/health'
+    }
       auth: "/auth",
       content: "/content",
       analytics: "/analytics",

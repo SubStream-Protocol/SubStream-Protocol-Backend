@@ -11,6 +11,7 @@
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
     "axios": "^1.6.2",
+    "better-sqlite3": "^12.8.0",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "ethers": "^6.8.1",

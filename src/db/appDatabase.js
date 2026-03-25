@@ -8,6 +8,48 @@ const Database = require('better-sqlite3');
  */
 class AppDatabase {
   /**
+   * Insert a notification for a creator.
+   * @param {{creatorId: string, type: string, message: string, metadata?: object, timestamp?: string}} notification
+   * @returns {object}
+   */
+  insertNotification(notification) {
+    const id = crypto.randomUUID();
+    const timestamp = notification.timestamp || new Date().toISOString();
+    this.ensureCreator(notification.creatorId);
+    this.db.prepare(
+      'INSERT INTO notifications (id, creator_id, type, message, metadata_json, timestamp, read) VALUES (?, ?, ?, ?, ?, ?, 0)'
+    ).run(
+      id,
+      notification.creatorId,
+      notification.type,
+      notification.message,
+      JSON.stringify(notification.metadata || {}),
+      timestamp
+    );
+    return this.db.prepare('SELECT * FROM notifications WHERE id = ?').get(id);
+  }
+
+  /**
+   * List notifications for a creator (most recent first).
+   * @param {string} creatorId
+   * @returns {object[]}
+   */
+  listNotificationsByCreatorId(creatorId) {
+    return this.db.prepare(
+      'SELECT * FROM notifications WHERE creator_id = ? ORDER BY timestamp DESC, id DESC'
+    ).all(creatorId);
+  }
+
+  /**
+   * Mark a notification as read.
+   * @param {string} notificationId
+   * @returns {object}
+   */
+  markNotificationAsRead(notificationId) {
+    this.db.prepare('UPDATE notifications SET read = 1 WHERE id = ?').run(notificationId);
+    return this.db.prepare('SELECT * FROM notifications WHERE id = ?').get(notificationId);
+  }
+  /**
    * @param {string} filename SQLite filename or `:memory:`.
    */
   constructor(filename) {
@@ -62,6 +104,25 @@ class AppDatabase {
         active INTEGER NOT NULL DEFAULT 1,
         subscribed_at TEXT NOT NULL,
         unsubscribed_at TEXT,
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        creator_id TEXT NOT NULL REFERENCES creators(id),
+        type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        metadata_json TEXT,
+        timestamp TEXT NOT NULL,
+        read INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS email_queue (
+        id TEXT PRIMARY KEY,
+        creator_id TEXT NOT NULL REFERENCES creators(id),
+        to_address TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        sent INTEGER NOT NULL DEFAULT 0,
+        timestamp TEXT NOT NULL
+      );
         PRIMARY KEY (creator_id, wallet_address)
       );
 

@@ -25,6 +25,7 @@ function createApp(dependencies = {}) {
   const app = express();
   const config = dependencies.config || loadConfig();
   const database = dependencies.database || new AppDatabase(config.database.filename);
+
   const auditLogService = dependencies.auditLogService || new CreatorAuditLogService(database);
   const creatorActionService =
     dependencies.creatorActionService || new CreatorActionService(database, auditLogService);
@@ -32,8 +33,19 @@ function createApp(dependencies = {}) {
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
+
+  // Notification and email utilities
+  const { NotificationService } = require('./src/services/notificationService');
+  const { sendEmail } = require('./src/utils/email');
+  const notificationService = dependencies.notificationService || new NotificationService(database);
+
   const subscriptionService =
-    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService });
+    dependencies.subscriptionService || new SubscriptionService({
+      database,
+      auditLogService,
+      notificationService,
+      emailUtil: { sendEmail },
+    });
 
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);

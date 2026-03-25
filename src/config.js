@@ -39,6 +39,30 @@ function loadConfig(env = process.env) {
       argumentMapping:
         env.SOROBAN_SUBSCRIPTION_ARGUMENTS || 'address:walletAddress,address:creatorAddress',
     },
+    transcoding: {
+      ffmpegPath: env.FFMPEG_PATH || 'ffmpeg',
+      outputDir: env.TRANSCODING_OUTPUT_DIR || './transcoded',
+      maxConcurrent: Number(env.MAX_CONCURRENT_TRANSCODINGS || 3),
+    },
+    redis: {
+      host: env.REDIS_HOST || 'localhost',
+      port: Number(env.REDIS_PORT || 6379),
+      password: env.REDIS_PASSWORD || '',
+      db: Number(env.REDIS_DB || 0),
+    },
+    s3: env.S3_BUCKET ? {
+      bucket: env.S3_BUCKET,
+      region: env.S3_REGION || 'us-east-1',
+      credentials: {
+        accessKeyId: env.S3_ACCESS_KEY_ID,
+        secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+      },
+    } : null,
+    ipfs: env.IPFS_HOST ? {
+      host: env.IPFS_HOST,
+      port: Number(env.IPFS_PORT || 5001),
+      protocol: env.IPFS_PROTOCOL || 'http',
+    } : null,
   };
 }
 

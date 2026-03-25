@@ -74,9 +74,25 @@ class AppDatabase {
       CREATE TABLE IF NOT EXISTS videos (
         id TEXT PRIMARY KEY,
         creator_id TEXT NOT NULL REFERENCES creators(id),
-        title TEXT,
-        visibility TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        original_filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'uploaded',
+        message TEXT,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS transcoding_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL REFERENCES videos(id),
+        master_playlist TEXT NOT NULL,
+        resolutions TEXT NOT NULL,
+        upload_results TEXT,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS coop_splits (
@@ -400,8 +416,14 @@ class AppDatabase {
   getCreatorSubscriberCount(creatorId) {
     this.ensureCreator(creatorId);
     const row = this.db
+<<<<<<< HEAD
       .prepare('SELECT subscriber_count AS subscriberCount FROM creators WHERE id = ?')
       .get(creatorId);
+=======
+      .prepare(`SELECT subscriber_count AS subscriberCount FROM creators WHERE id = ?`)
+      .get(creatorId);
+
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
     return (row && Number(row.subscriberCount)) || 0;
   }
 
@@ -416,10 +438,16 @@ class AppDatabase {
     return this.transaction(() => {
       this.ensureCreator(creatorId);
       this.db
+<<<<<<< HEAD
         .prepare(
           'UPDATE creators SET subscriber_count = COALESCE(subscriber_count, 0) + 1 WHERE id = ?',
         )
         .run(creatorId);
+=======
+        .prepare(`UPDATE creators SET subscriber_count = COALESCE(subscriber_count, 0) + 1 WHERE id = ?`)
+        .run(creatorId);
+
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
       return this.getCreatorSubscriberCount(creatorId);
     });
   }
@@ -436,9 +464,16 @@ class AppDatabase {
       this.ensureCreator(creatorId);
       this.db
         .prepare(
+<<<<<<< HEAD
           'UPDATE creators SET subscriber_count = MAX(COALESCE(subscriber_count, 0) - 1, 0) WHERE id = ?',
         )
         .run(creatorId);
+=======
+          `UPDATE creators SET subscriber_count = MAX(COALESCE(subscriber_count, 0) - 1, 0) WHERE id = ?`,
+        )
+        .run(creatorId);
+
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
       return this.getCreatorSubscriberCount(creatorId);
     });
   }
@@ -455,15 +490,24 @@ class AppDatabase {
       this.ensureCreator(creatorId);
       const safe = Math.max(0, Math.floor(Number(count) || 0));
       this.db
+<<<<<<< HEAD
         .prepare('UPDATE creators SET subscriber_count = ? WHERE id = ?')
         .run(safe, creatorId);
+=======
+        .prepare(`UPDATE creators SET subscriber_count = ? WHERE id = ?`)
+        .run(safe, creatorId);
+
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
       return this.getCreatorSubscriberCount(creatorId);
     });
   }
 
   /**
    * Get a subscription row for a creator and wallet.
+<<<<<<< HEAD
    *
+=======
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
    * @param {string} creatorId
    * @param {string} walletAddress
    * @returns {object|null}
@@ -471,12 +515,23 @@ class AppDatabase {
   getSubscription(creatorId, walletAddress) {
     const row = this.db
       .prepare(
+<<<<<<< HEAD
         'SELECT creator_id AS creatorId, wallet_address AS walletAddress, active, subscribed_at AS subscribedAt, unsubscribed_at AS unsubscribedAt FROM subscriptions WHERE creator_id = ? AND wallet_address = ?',
       )
       .get(creatorId, walletAddress);
     return row || null;
   }
 
+=======
+        `SELECT creator_id AS creatorId, wallet_address AS walletAddress, active, subscribed_at AS subscribedAt, unsubscribed_at AS unsubscribedAt FROM subscriptions WHERE creator_id = ? AND wallet_address = ?`,
+      )
+      .get(creatorId, walletAddress);
+   * Create a new comment.
+   *
+   * @param {{postId: string, userAddress: string, creatorId: string, content: string}} comment Comment data.
+   * @returns {object}
+   */
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
   createComment(comment) {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -513,9 +568,13 @@ class AppDatabase {
   }
 
   /**
+<<<<<<< HEAD
    * Create or activate a subscription for a wallet.
    * Returns { changed: boolean, count: number }.
    *
+=======
+   * Create or activate a subscription for a wallet. Returns { changed: boolean, count: number }
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
    * @param {string} creatorId
    * @param {string} walletAddress
    */
@@ -526,10 +585,15 @@ class AppDatabase {
       const now = new Date().toISOString();
 
       if (existing && existing.active === 1) {
+<<<<<<< HEAD
+=======
+        // already active
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
         return { changed: false, count: this.getCreatorSubscriberCount(creatorId) };
       }
 
       if (existing) {
+<<<<<<< HEAD
         this.db
           .prepare(
             'UPDATE subscriptions SET active = 1, subscribed_at = ?, unsubscribed_at = NULL WHERE creator_id = ? AND wallet_address = ?',
@@ -550,13 +614,36 @@ class AppDatabase {
         .run(creatorId);
 
       return { changed: true, count: this.getCreatorSubscriberCount(creatorId) };
+=======
+        // reactivate
+        this.db
+          .prepare(`UPDATE subscriptions SET active = 1, subscribed_at = ?, unsubscribed_at = NULL WHERE creator_id = ? AND wallet_address = ?`)
+          .run(now, creatorId, walletAddress);
+      } else {
+        this.db
+          .prepare(`INSERT INTO subscriptions (creator_id, wallet_address, active, subscribed_at) VALUES (?, ?, 1, ?)`)
+          .run(creatorId, walletAddress, now);
+      }
+
+      // Increment cached count
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = COALESCE(subscriber_count, 0) + 1 WHERE id = ?`)
+        .run(creatorId);
+
+      const newCount = this.getCreatorSubscriberCount(creatorId);
+      return { changed: true, count: newCount };
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
     });
   }
 
   /**
+<<<<<<< HEAD
    * Deactivate a subscription if it is currently active.
    * Returns { changed: boolean, count: number }.
    *
+=======
+   * Deactivate a subscription if it is currently active. Returns { changed: boolean, count: number }
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
    * @param {string} creatorId
    * @param {string} walletAddress
    */
@@ -571,6 +658,7 @@ class AppDatabase {
       }
 
       this.db
+<<<<<<< HEAD
         .prepare(
           'UPDATE subscriptions SET active = 0, unsubscribed_at = ? WHERE creator_id = ? AND wallet_address = ?',
         )
@@ -583,22 +671,49 @@ class AppDatabase {
         .run(creatorId);
 
       return { changed: true, count: this.getCreatorSubscriberCount(creatorId) };
+=======
+        .prepare(`UPDATE subscriptions SET active = 0, unsubscribed_at = ? WHERE creator_id = ? AND wallet_address = ?`)
+        .run(now, creatorId, walletAddress);
+
+      // Decrement cached count, clamp at 0
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = MAX(COALESCE(subscriber_count, 0) - 1, 0) WHERE id = ?`)
+        .run(creatorId);
+
+      const newCount = this.getCreatorSubscriberCount(creatorId);
+      return { changed: true, count: newCount };
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
     });
   }
 
   /**
    * Count active subscriptions for a creator (derived from subscriptions table).
+<<<<<<< HEAD
    *
+=======
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
    * @param {string} creatorId
    * @returns {number}
    */
   countActiveSubscriptions(creatorId) {
     const row = this.db
+<<<<<<< HEAD
       .prepare('SELECT COUNT(1) AS ct FROM subscriptions WHERE creator_id = ? AND active = 1')
       .get(creatorId);
     return (row && Number(row.ct)) || 0;
   }
 
+=======
+      .prepare(`SELECT COUNT(1) AS ct FROM subscriptions WHERE creator_id = ? AND active = 1`)
+      .get(creatorId);
+
+    return (row && Number(row.ct)) || 0;
+   * Get comments by post ID.
+   *
+   * @param {string} postId Post identifier.
+   * @returns {object[]}
+   */
+>>>>>>> 836b2a0c1c539c5845cf26a353a9c4feb668e02f
   getCommentsByPostId(postId) {
     return this.db
       .prepare(

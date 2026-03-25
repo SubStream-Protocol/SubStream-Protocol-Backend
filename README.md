@@ -4,6 +4,14 @@ A comprehensive backend API for the SubStream Protocol, supporting wallet-based 
 
 ## Features
 
+### 🎥 Video Transcoding & Streaming
+- **Multi-resolution transcoding**: Automatic conversion to 360p, 720p, and 1080p
+- **HLS streaming**: Segmented video for smooth adaptive bitrate streaming
+- **Adaptive quality**: Automatic quality selection based on connection speed
+- **Background processing**: Queue-based transcoding with Redis
+- **Storage flexibility**: Support for S3 and IPFS storage
+- **Pay-per-second integration**: Seamless integration with subscription system
+
 ### 🔐 Authentication (SIWE)
 - Wallet-based authentication using Sign In With Ethereum
 - JWT token generation and validation
@@ -32,33 +40,64 @@ A comprehensive backend API for the SubStream Protocol, supporting wallet-based 
 ## Quick Start
 
 ### Prerequisites
-- Node.js 16+
+- Node.js 20.11.0+
 - npm or yarn
+- FFmpeg (for video transcoding)
+- Redis (for job queue)
 
 ### Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/jobbykings/SubStream-Protocol-Backend.git
+git clone https://github.com/lifewithbigdamz/SubStream-Protocol-Backend.git
 cd SubStream-Protocol-Backend
 ```
 
-2. Install dependencies:
+2. Install FFmpeg:
+```bash
+# Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Windows
+# Download from https://ffmpeg.org/download.html
+```
+
+3. Install and start Redis:
+```bash
+# Ubuntu/Debian
+sudo apt-get install redis-server
+sudo systemctl start redis
+
+# macOS
+brew install redis
+brew services start redis
+
+# Windows
+# Download from https://redis.io/download
+```
+
+4. Install dependencies:
 ```bash
 npm install
 ```
 
-3. Copy environment variables:
+5. Copy environment variables:
 ```bash
 cp .env.example .env
 ```
 
-4. Configure your environment variables in `.env`:
+6. Configure your environment variables in `.env`:
 - Set your JWT secret
 - Add IPFS service API keys
-- Configure database connections (optional for development)
+- Configure Redis connection
+- Set up S3 credentials (optional)
+- Configure FFmpeg path
+- Set up CDN base URL
 
-5. Start the server:
+7. Start the server:
 ```bash
 # Development
 npm run dev

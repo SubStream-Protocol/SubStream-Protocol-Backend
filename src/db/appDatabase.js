@@ -55,9 +55,25 @@ class AppDatabase {
       CREATE TABLE IF NOT EXISTS videos (
         id TEXT PRIMARY KEY,
         creator_id TEXT NOT NULL REFERENCES creators(id),
-        title TEXT,
-        visibility TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        original_filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'uploaded',
+        message TEXT,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS transcoding_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL REFERENCES videos(id),
+        master_playlist TEXT NOT NULL,
+        resolutions TEXT NOT NULL,
+        upload_results TEXT,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS coop_splits (

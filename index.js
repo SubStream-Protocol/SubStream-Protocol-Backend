@@ -12,6 +12,7 @@ const { CreatorAuditLogService } = require('./src/services/creatorAuditLogServic
 const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
+const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const createVideoRoutes = require('./routes/video');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
@@ -37,9 +38,36 @@ function createApp(dependencies = {}) {
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
   const subscriptionService =
     dependencies.subscriptionService || new SubscriptionService({ database, auditLogService });
+  const subscriptionExpiryChecker =
+    dependencies.subscriptionExpiryChecker ||
+    new SubscriptionExpiryChecker({
+      database,
+      lowBalanceEmailService: dependencies.lowBalanceEmailService,
+    });
 
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
+  app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
+
+  const dayInMs = 24 * 60 * 60 * 1000;
+  const subscriptionExpiryCheckerInterval = setInterval(async () => {
+    try {
+      await subscriptionExpiryChecker.runDailyCheck();
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'Subscription expiry checker failed:',
+        error && error.message ? error.message : error,
+      );
+    }
+  }, dayInMs);
+
+  if (typeof subscriptionExpiryCheckerInterval.unref === 'function') {
+    subscriptionExpiryCheckerInterval.unref();
+  }
+
+  app.set('subscriptionExpiryCheckerInterval', subscriptionExpiryCheckerInterval);
+
   const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
 
   app.use(cors());

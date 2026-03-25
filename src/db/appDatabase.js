@@ -474,11 +474,9 @@ class AppDatabase {
         'SELECT creator_id AS creatorId, wallet_address AS walletAddress, active, subscribed_at AS subscribedAt, unsubscribed_at AS unsubscribedAt FROM subscriptions WHERE creator_id = ? AND wallet_address = ?',
       )
       .get(creatorId, walletAddress);
-   * Create a new comment.
-   *
-   * @param {{postId: string, userAddress: string, creatorId: string, content: string}} comment Comment data.
-   * @returns {object}
-   */
+    return row || null;
+  }
+
   createComment(comment) {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -599,11 +597,8 @@ class AppDatabase {
       .prepare('SELECT COUNT(1) AS ct FROM subscriptions WHERE creator_id = ? AND active = 1')
       .get(creatorId);
     return (row && Number(row.ct)) || 0;
-   * Get comments by post ID.
-   *
-   * @param {string} postId Post identifier.
-   * @returns {object[]}
-   */
+  }
+
   getCommentsByPostId(postId) {
     return this.db
       .prepare(

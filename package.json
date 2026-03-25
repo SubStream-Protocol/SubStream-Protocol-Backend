@@ -10,18 +10,26 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
+    "aws-sdk": "^2.1500.0",
     "axios": "^1.6.2",
+    "bull": "^4.12.2",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "ethers": "^6.8.1",
     "express": "^5.2.1",
+    "fluent-ffmpeg": "^2.1.2",
     "form-data": "^4.0.0",
     "ioredis": "^5.6.1",
     "ipfs-http-client": "^60.0.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
+    "redis": "^4.6.10",
     "stellar-sdk": "^13.3.0",
+    "uuid": "^9.0.1",
     "web3.storage": "^4.5.4"
+  },
+  "engines": {
+    "node": ">=20.11.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",

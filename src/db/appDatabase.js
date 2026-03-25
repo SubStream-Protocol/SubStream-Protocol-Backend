@@ -15,6 +15,7 @@ class AppDatabase {
     this.ensureDirectory();
     this.db = new DatabaseSync(filename);
     this.initializeSchema();
+    this.ensureSubscriberCountColumn();
   }
 
   /**
@@ -54,9 +55,25 @@ class AppDatabase {
       CREATE TABLE IF NOT EXISTS videos (
         id TEXT PRIMARY KEY,
         creator_id TEXT NOT NULL REFERENCES creators(id),
-        title TEXT,
-        visibility TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        original_filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'uploaded',
+        message TEXT,
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS transcoding_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL REFERENCES videos(id),
+        master_playlist TEXT NOT NULL,
+        resolutions TEXT NOT NULL,
+        upload_results TEXT,
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS coop_splits (
@@ -78,6 +95,24 @@ class AppDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        creator_id TEXT NOT NULL REFERENCES creators(id),
+        wallet_address TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        subscribed_at TEXT NOT NULL,
+        unsubscribed_at TEXT,
+        PRIMARY KEY (creator_id, wallet_address)
+      );
+
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        creator_id TEXT NOT NULL REFERENCES creators(id),
+        wallet_address TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        subscribed_at TEXT NOT NULL,
+        unsubscribed_at TEXT,
+        PRIMARY KEY (creator_id, wallet_address)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_creator_audit_logs_creator_timestamp
       ON creator_audit_logs (creator_id, timestamp DESC);
 
@@ -95,6 +130,30 @@ class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_comments_creator_id ON comments (creator_id);
       CREATE INDEX IF NOT EXISTS idx_comments_user_address ON comments (user_address);
     `);
+  }
+
+  /**
+   * Ensure the creators table has a subscriber_count column.
+   * This is a noop for in-memory DBs that already have the column.
+   */
+  ensureSubscriberCountColumn() {
+    try {
+      const info = this.db
+        .prepare("PRAGMA table_info(creators);")
+        .all();
+
+      const hasColumn = info.some((col) => col.name === 'subscriber_count');
+
+      if (!hasColumn) {
+        // Add the column with a default of 0
+        this.db.exec(`ALTER TABLE creators ADD COLUMN subscriber_count INTEGER DEFAULT 0`);
+      }
+    } catch (error) {
+      // If anything goes wrong, log and continue — schema migrations
+      // should be non-fatal for existing deployments in this simple codebase.
+      // eslint-disable-next-line no-console
+      console.warn('ensureSubscriberCountColumn failed:', error.message);
+    }
   }
 
   /**
@@ -423,6 +482,90 @@ class AppDatabase {
   }
 
   /**
+   * Get the cached subscriber count for a creator.
+   * Ensures the creator row exists and returns a number (0 if missing).
+   *
+   * @param {string} creatorId
+   * @returns {number}
+   */
+  getCreatorSubscriberCount(creatorId) {
+    this.ensureCreator(creatorId);
+    const row = this.db
+      .prepare(`SELECT subscriber_count AS subscriberCount FROM creators WHERE id = ?`)
+      .get(creatorId);
+
+    return (row && Number(row.subscriberCount)) || 0;
+  }
+
+  /**
+   * Increment the subscriber count for a creator by 1.
+   * Returns the new count.
+   *
+   * @param {string} creatorId
+   * @returns {number}
+   */
+  incrementCreatorSubscriberCount(creatorId) {
+    return this.transaction(() => {
+      this.ensureCreator(creatorId);
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = COALESCE(subscriber_count, 0) + 1 WHERE id = ?`)
+        .run(creatorId);
+
+      return this.getCreatorSubscriberCount(creatorId);
+    });
+  }
+
+  /**
+   * Decrement the subscriber count for a creator by 1, clamped at 0.
+   * Returns the new count.
+   *
+   * @param {string} creatorId
+   * @returns {number}
+   */
+  decrementCreatorSubscriberCount(creatorId) {
+    return this.transaction(() => {
+      this.ensureCreator(creatorId);
+      this.db
+        .prepare(
+          `UPDATE creators SET subscriber_count = MAX(COALESCE(subscriber_count, 0) - 1, 0) WHERE id = ?`,
+        )
+        .run(creatorId);
+
+      return this.getCreatorSubscriberCount(creatorId);
+    });
+  }
+
+  /**
+   * Set the subscriber count explicitly.
+   *
+   * @param {string} creatorId
+   * @param {number} count
+   * @returns {number}
+   */
+  setCreatorSubscriberCount(creatorId, count) {
+    return this.transaction(() => {
+      this.ensureCreator(creatorId);
+      const safe = Math.max(0, Math.floor(Number(count) || 0));
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = ? WHERE id = ?`)
+        .run(safe, creatorId);
+
+      return this.getCreatorSubscriberCount(creatorId);
+    });
+  }
+
+  /**
+   * Get a subscription row for a creator and wallet.
+   * @param {string} creatorId
+   * @param {string} walletAddress
+   * @returns {object|null}
+   */
+  getSubscription(creatorId, walletAddress) {
+    const row = this.db
+      .prepare(
+        `SELECT creator_id AS creatorId, wallet_address AS walletAddress, active, subscribed_at AS subscribedAt, unsubscribed_at AS unsubscribedAt FROM subscriptions WHERE creator_id = ? AND wallet_address = ?`,
+      )
+      .get(creatorId, walletAddress);
    * Create a new comment.
    *
    * @param {{postId: string, userAddress: string, creatorId: string, content: string}} comment Comment data.
@@ -464,6 +607,82 @@ class AppDatabase {
   }
 
   /**
+   * Create or activate a subscription for a wallet. Returns { changed: boolean, count: number }
+   * @param {string} creatorId
+   * @param {string} walletAddress
+   */
+  createOrActivateSubscription(creatorId, walletAddress) {
+    return this.transaction(() => {
+      this.ensureCreator(creatorId);
+      const existing = this.getSubscription(creatorId, walletAddress);
+      const now = new Date().toISOString();
+
+      if (existing && existing.active === 1) {
+        // already active
+        return { changed: false, count: this.getCreatorSubscriberCount(creatorId) };
+      }
+
+      if (existing) {
+        // reactivate
+        this.db
+          .prepare(`UPDATE subscriptions SET active = 1, subscribed_at = ?, unsubscribed_at = NULL WHERE creator_id = ? AND wallet_address = ?`)
+          .run(now, creatorId, walletAddress);
+      } else {
+        this.db
+          .prepare(`INSERT INTO subscriptions (creator_id, wallet_address, active, subscribed_at) VALUES (?, ?, 1, ?)`)
+          .run(creatorId, walletAddress, now);
+      }
+
+      // Increment cached count
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = COALESCE(subscriber_count, 0) + 1 WHERE id = ?`)
+        .run(creatorId);
+
+      const newCount = this.getCreatorSubscriberCount(creatorId);
+      return { changed: true, count: newCount };
+    });
+  }
+
+  /**
+   * Deactivate a subscription if it is currently active. Returns { changed: boolean, count: number }
+   * @param {string} creatorId
+   * @param {string} walletAddress
+   */
+  deactivateSubscription(creatorId, walletAddress) {
+    return this.transaction(() => {
+      this.ensureCreator(creatorId);
+      const existing = this.getSubscription(creatorId, walletAddress);
+      const now = new Date().toISOString();
+
+      if (!existing || existing.active !== 1) {
+        return { changed: false, count: this.getCreatorSubscriberCount(creatorId) };
+      }
+
+      this.db
+        .prepare(`UPDATE subscriptions SET active = 0, unsubscribed_at = ? WHERE creator_id = ? AND wallet_address = ?`)
+        .run(now, creatorId, walletAddress);
+
+      // Decrement cached count, clamp at 0
+      this.db
+        .prepare(`UPDATE creators SET subscriber_count = MAX(COALESCE(subscriber_count, 0) - 1, 0) WHERE id = ?`)
+        .run(creatorId);
+
+      const newCount = this.getCreatorSubscriberCount(creatorId);
+      return { changed: true, count: newCount };
+    });
+  }
+
+  /**
+   * Count active subscriptions for a creator (derived from subscriptions table).
+   * @param {string} creatorId
+   * @returns {number}
+   */
+  countActiveSubscriptions(creatorId) {
+    const row = this.db
+      .prepare(`SELECT COUNT(1) AS ct FROM subscriptions WHERE creator_id = ? AND active = 1`)
+      .get(creatorId);
+
+    return (row && Number(row.ct)) || 0;
    * Get comments by post ID.
    *
    * @param {string} postId Post identifier.

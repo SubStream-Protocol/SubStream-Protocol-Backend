@@ -1,4 +1,5 @@
 const EventEmitter = require('events');
+const { EventPublisherService } = require('./eventPublisherService');
 
 /**
  * SubscriptionService maintains cached subscriber counts and handles
@@ -6,18 +7,21 @@ const EventEmitter = require('events');
  */
 class SubscriptionService extends EventEmitter {
   /**
-   * @param {{database: import('../db/appDatabase').AppDatabase, auditLogService?: any}} options
+   * @param {{database: import('../db/appDatabase').AppDatabase, auditLogService?: any, config?: any}} options
    */
   /**
    * @param {{database: import('../db/appDatabase').AppDatabase, auditLogService?: any, notificationService?: any, emailUtil?: any}} options
    */
   constructor({ database, auditLogService, notificationService, emailUtil } = {}) {
+  constructor({ database, auditLogService, config } = {}) {
     super();
     if (!database) throw new Error('database is required');
     this.database = database;
     this.auditLogService = auditLogService || null;
     this.notificationService = notificationService || null;
     this.emailUtil = emailUtil || null;
+    this.config = config;
+    this.eventPublisher = config ? new EventPublisherService(config.rabbitmq) : null;
   }
 
   /**
@@ -103,6 +107,24 @@ class SubscriptionService extends EventEmitter {
       // Audit failures should not block subscription processing
       // eslint-disable-next-line no-console
       console.warn('Failed to append subscription audit log:', err && err.message);
+    }
+
+    // Publish async event to RabbitMQ for background processing
+    try {
+      if (this.eventPublisher) {
+        await this.eventPublisher.publishSubscriptionEvent({
+          type,
+          creatorId,
+          walletAddress: event.walletAddress,
+          timestamp: event.timestamp || new Date().toISOString(),
+          ipAddress: event.ipAddress,
+          metadata: { newCount },
+        });
+      }
+    } catch (err) {
+      // Event publishing failures should not block subscription processing
+      // eslint-disable-next-line no-console
+      console.warn('Failed to publish subscription event:', err && err.message);
     }
 
     return { creatorId, newCount };

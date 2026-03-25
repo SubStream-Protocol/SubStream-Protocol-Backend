@@ -12,8 +12,13 @@ const { CreatorAuditLogService } = require('./src/services/creatorAuditLogServic
 const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
+const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
+const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
+const GlobalStatsService = require('./src/services/globalStatsService');
+const GlobalStatsWorker = require('./src/services/globalStatsWorker');
 const createVideoRoutes = require('./routes/video');
+const createGlobalStatsRouter = require('./routes/globalStats');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -51,10 +56,68 @@ function createApp(dependencies = {}) {
       notificationService,
       emailUtil: { sendEmail },
     });
+    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
+  const subscriptionExpiryChecker =
+    dependencies.subscriptionExpiryChecker ||
+    new SubscriptionExpiryChecker({
+      database,
+      lowBalanceEmailService: dependencies.lowBalanceEmailService,
+    });
+
+  // Initialize background worker service for async processing
+  const backgroundWorker = dependencies.backgroundWorker || new BackgroundWorkerService(config.rabbitmq);
 
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
+  app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
+  app.set('backgroundWorker', backgroundWorker);
+
+  // Start background worker if RabbitMQ is configured
+  if (config.rabbitmq && (config.rabbitmq.url || config.rabbitmq.host)) {
+    backgroundWorker.start().catch(error => {
+      console.error('Failed to start background worker:', error);
+    });
+  }
+
+  const dayInMs = 24 * 60 * 60 * 1000;
+  const subscriptionExpiryCheckerInterval = setInterval(async () => {
+    try {
+      await subscriptionExpiryChecker.runDailyCheck();
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        'Subscription expiry checker failed:',
+        error && error.message ? error.message : error,
+      );
+    }
+  }, dayInMs);
+
+  if (typeof subscriptionExpiryCheckerInterval.unref === 'function') {
+    subscriptionExpiryCheckerInterval.unref();
+  }
+
+  app.set('subscriptionExpiryCheckerInterval', subscriptionExpiryCheckerInterval);
+
   const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
+
+  // Initialize global stats service and worker
+  const globalStatsService = dependencies.globalStatsService || new GlobalStatsService(database);
+  const globalStatsWorker = dependencies.globalStatsWorker || new GlobalStatsWorker(database, {
+    refreshInterval: process.env.GLOBAL_STATS_REFRESH_INTERVAL ? parseInt(process.env.GLOBAL_STATS_REFRESH_INTERVAL) : 60000,
+    initialDelay: process.env.GLOBAL_STATS_INITIAL_DELAY ? parseInt(process.env.GLOBAL_STATS_INITIAL_DELAY) : 5000
+  });
+
+  // expose services on the express app so external routers can access them
+  app.set('subscriptionService', subscriptionService);
+  app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
+  app.set('backgroundWorker', backgroundWorker);
+  app.set('globalStatsService', globalStatsService);
+  app.set('globalStatsWorker', globalStatsWorker);
+
+  // Start global stats worker
+  globalStatsWorker.start().catch(error => {
+    console.error('Failed to start global stats worker:', error);
+  });
 
   app.use(cors());
   app.use(express.json());
@@ -62,6 +125,9 @@ function createApp(dependencies = {}) {
   app.use('/api/subscription', require('./routes/subscription'));
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
+  
+  // Global stats endpoints
+  app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
 
   app.use((req, res, next) => {
     req.config = config;
@@ -434,11 +500,6 @@ app.get("/health", (req, res) => {
       storage: 'active',
       posts: 'active'
     }
-      auth: "active",
-      content: "active",
-      analytics: "active",
-      storage: "active",
-    },
   });
 });
 
@@ -457,12 +518,6 @@ app.get("/", (req, res) => {
       posts: '/posts',
       health: '/health'
     }
-      auth: "/auth",
-      content: "/content",
-      analytics: "/analytics",
-      storage: "/storage",
-      health: "/health",
-    },
   });
 });
 

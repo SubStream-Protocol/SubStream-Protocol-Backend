@@ -16,6 +16,7 @@ class AppDatabase {
     this.db = new DatabaseSync(filename);
     this.initializeSchema();
     this.ensureSubscriberCountColumn();
+    this.ensureSubscriptionRiskColumns();
   }
 
   /**
@@ -153,6 +154,48 @@ class AppDatabase {
       // should be non-fatal for existing deployments in this simple codebase.
       // eslint-disable-next-line no-console
       console.warn('ensureSubscriberCountColumn failed:', error.message);
+    }
+  }
+
+  /**
+   * Ensure subscriptions table has fields used by low-balance risk checks.
+   *
+   * @returns {void}
+   */
+  ensureSubscriptionRiskColumns() {
+    try {
+      const info = this.db
+        .prepare("PRAGMA table_info(subscriptions);")
+        .all();
+
+      const hasBalance = info.some((col) => col.name === 'balance');
+      const hasDailySpend = info.some((col) => col.name === 'daily_spend');
+      const hasUserEmail = info.some((col) => col.name === 'user_email');
+      const hasRiskStatus = info.some((col) => col.name === 'risk_status');
+      const hasEstimatedRunOutAt = info.some((col) => col.name === 'estimated_run_out_at');
+
+      if (!hasBalance) {
+        this.db.exec(`ALTER TABLE subscriptions ADD COLUMN balance REAL`);
+      }
+
+      if (!hasDailySpend) {
+        this.db.exec(`ALTER TABLE subscriptions ADD COLUMN daily_spend REAL`);
+      }
+
+      if (!hasUserEmail) {
+        this.db.exec(`ALTER TABLE subscriptions ADD COLUMN user_email TEXT`);
+      }
+
+      if (!hasRiskStatus) {
+        this.db.exec(`ALTER TABLE subscriptions ADD COLUMN risk_status TEXT`);
+      }
+
+      if (!hasEstimatedRunOutAt) {
+        this.db.exec(`ALTER TABLE subscriptions ADD COLUMN estimated_run_out_at TEXT`);
+      }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('ensureSubscriptionRiskColumns failed:', error.message);
     }
   }
 
@@ -566,6 +609,63 @@ class AppDatabase {
         `SELECT creator_id AS creatorId, wallet_address AS walletAddress, active, subscribed_at AS subscribedAt, unsubscribed_at AS unsubscribedAt FROM subscriptions WHERE creator_id = ? AND wallet_address = ?`,
       )
       .get(creatorId, walletAddress);
+    return row || null;
+  }
+
+  /**
+   * List active subscriptions that can be assessed for low-balance risk.
+   *
+   * @returns {Array<{creatorId: string, walletAddress: string, balance: number|null, dailySpend: number|null, userEmail: string|null}>}
+   */
+  listSubscriptionsForRiskCheck() {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          creator_id AS creatorId,
+          wallet_address AS walletAddress,
+          balance,
+          daily_spend AS dailySpend,
+          user_email AS userEmail
+        FROM subscriptions
+        WHERE active = 1
+      `,
+      )
+      .all();
+  }
+
+  /**
+   * Persist estimated run-out date and optionally update risk status.
+   *
+   * @param {{creatorId: string, walletAddress: string, estimatedRunOutAt: string|null, riskStatus?: string|null}} input
+   * @returns {void}
+   */
+  updateSubscriptionRiskAssessment(input) {
+    if (input.riskStatus === undefined) {
+      this.db
+        .prepare(
+          `
+          UPDATE subscriptions
+          SET estimated_run_out_at = ?
+          WHERE creator_id = ? AND wallet_address = ?
+        `,
+        )
+        .run(input.estimatedRunOutAt, input.creatorId, input.walletAddress);
+      return;
+    }
+
+    this.db
+      .prepare(
+        `
+        UPDATE subscriptions
+        SET estimated_run_out_at = ?, risk_status = ?
+        WHERE creator_id = ? AND wallet_address = ?
+      `,
+      )
+      .run(input.estimatedRunOutAt, input.riskStatus, input.creatorId, input.walletAddress);
+  }
+
+  /**
    * Create a new comment.
    *
    * @param {{postId: string, userAddress: string, creatorId: string, content: string}} comment Comment data.
@@ -683,6 +783,9 @@ class AppDatabase {
       .get(creatorId);
 
     return (row && Number(row.ct)) || 0;
+  }
+
+  /**
    * Get comments by post ID.
    *
    * @param {string} postId Post identifier.

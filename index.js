@@ -12,6 +12,8 @@ const { CreatorAuditLogService } = require('./src/services/creatorAuditLogServic
 const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
+const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
+const createVideoRoutes = require('./routes/video');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -38,11 +40,19 @@ function createApp(dependencies = {}) {
 
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
+  const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
 
   app.use(cors());
   app.use(express.json());
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
+
+  app.use((req, res, next) => {
+    req.config = config;
+    req.database = database;
+    req.subscriptionVerifier = subscriptionVerifier;
+    next();
+  });
 
   app.get('/', (req, res) => {
     res.json({
@@ -258,6 +268,8 @@ function createApp(dependencies = {}) {
     );
     return res.status(200).send(pdf);
   });
+
+  app.use('/api/videos', createVideoRoutes(config, database, videoWorker));
 
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
 

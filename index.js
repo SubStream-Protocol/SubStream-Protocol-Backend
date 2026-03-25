@@ -42,6 +42,8 @@ function createApp(dependencies = {}) {
   app.use(express.json());
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
+  // Payouts API
+  app.use('/api/payouts', require('./routes/payouts'));
 
   app.get('/', (req, res) => {
     res.json({

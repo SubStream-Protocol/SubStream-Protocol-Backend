@@ -35,6 +35,7 @@ function createApp(dependencies = {}) {
   const app = express();
   const config = dependencies.config || loadConfig();
   const database = dependencies.database || new AppDatabase(config.database.filename);
+
   const auditLogService = dependencies.auditLogService || new CreatorAuditLogService(database);
   const creatorActionService =
     dependencies.creatorActionService || new CreatorActionService(database, auditLogService);
@@ -42,7 +43,19 @@ function createApp(dependencies = {}) {
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
+
+  // Notification and email utilities
+  const { NotificationService } = require('./src/services/notificationService');
+  const { sendEmail } = require('./src/utils/email');
+  const notificationService = dependencies.notificationService || new NotificationService(database);
+
   const subscriptionService =
+    dependencies.subscriptionService || new SubscriptionService({
+      database,
+      auditLogService,
+      notificationService,
+      emailUtil: { sendEmail },
+    });
     dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
   const subscriptionExpiryChecker =
     dependencies.subscriptionExpiryChecker ||
@@ -110,6 +123,8 @@ function createApp(dependencies = {}) {
   app.use(express.json());
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
+  // Payouts API
+  app.use('/api/payouts', require('./routes/payouts'));
   
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));

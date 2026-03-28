@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const cronService = require('./services/cronService');
 
 // Load environment variables
 dotenv.config();
@@ -18,6 +19,11 @@ app.use('/auth', require('./routes/auth'));
 app.use('/content', require('./routes/content'));
 app.use('/analytics', require('./routes/analytics'));
 app.use('/storage', require('./routes/storage'));
+app.use('/feed', require('./routes/feed'));
+app.use('/badges', require('./routes/badges'));
+app.use('/tax', require('./routes/tax'));
+app.use('/user', require('./routes/user'));
+app.use('/admin', require('./routes/admin'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -29,7 +35,12 @@ app.get('/health', (req, res) => {
       auth: 'active',
       content: 'active',
       analytics: 'active',
-      storage: 'active'
+      storage: 'active',
+      feed: 'active',
+      badges: 'active',
+      tax: 'active',
+      user: 'active',
+      admin: 'active'
     }
   });
 });
@@ -46,6 +57,11 @@ app.get('/', (req, res) => {
       content: '/content',
       analytics: '/analytics',
       storage: '/storage',
+      feed: '/feed',
+      badges: '/badges',
+      tax: '/tax',
+      user: '/user',
+      admin: '/admin',
       health: '/health'
     }
   });

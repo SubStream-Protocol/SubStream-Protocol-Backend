@@ -20,6 +20,12 @@ const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
 const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
+const { IPIntelligenceService } = require('./src/services/ipIntelligenceService');
+const { IPBlockingService } = require('./src/services/ipBlockingService');
+const { IPMonitoringService } = require('./src/services/ipMonitoringService');
+const { IPIntelligenceMiddleware } = require('./src/middleware/ipIntelligenceMiddleware');
+const { BehavioralBiometricService } = require('./src/services/behavioralBiometricService');
+const { BotDetectionClassifier } = require('./src/services/botDetectionClassifier');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
 const GlobalStatsService = require('./src/services/globalStatsService');
@@ -28,6 +34,8 @@ const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
 const createDeviceRoutes = require('./routes/device');
 const createSwaggerRoutes = require('./routes/swagger');
+const { createIPIntelligenceRoutes } = require('./routes/ipIntelligence');
+const { createBehavioralBiometricRoutes } = require('./routes/behavioralBiometric');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -66,7 +74,7 @@ function createApp(dependencies = {}) {
       notificationService,
       emailUtil: { sendEmail },
     });
-    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
+  dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
   const subscriptionExpiryChecker =
     dependencies.subscriptionExpiryChecker ||
     new SubscriptionExpiryChecker({
@@ -141,14 +149,14 @@ function createApp(dependencies = {}) {
 
   app.use(cors());
   app.use(express.json());
-  
+
   // Add request tracing middleware for structured logging
   app.use(requestTracingMiddleware);
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
-  
+
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
 
@@ -403,6 +411,22 @@ function createApp(dependencies = {}) {
   // API Documentation with Swagger UI
   app.use('/api/docs', createSwaggerRoutes);
 
+  // IP Intelligence management routes
+  if (ipIntelligenceService) {
+    app.use('/api/ip-intelligence', createIPIntelligenceRoutes({
+      ipIntelligenceService,
+      ipBlockingService,
+      ipMonitoringService
+    }));
+  }
+
+  // Behavioral biometric management routes
+  if (behavioralService) {
+    app.use('/api/behavioral', createBehavioralBiometricRoutes({
+      behavioralService
+    }));
+  }
+
   // Health check endpoint
   app.get('/health', async (req, res) => {
     const health = {
@@ -414,6 +438,8 @@ function createApp(dependencies = {}) {
         redis: 'Unknown',
         rabbitmq: 'Unknown',
         stellar: 'Unknown',
+        ipIntelligence: 'Unknown',
+        behavioralBiometric: 'Unknown'
       },
     };
 
@@ -470,6 +496,32 @@ function createApp(dependencies = {}) {
       isDegraded = true;
     }
 
+    // Check IP Intelligence
+    try {
+      if (ipIntelligenceService) {
+        const stats = ipIntelligenceService.getServiceStats();
+        health.services.ipIntelligence = 'Running';
+      } else {
+        health.services.ipIntelligence = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.ipIntelligence = 'Error';
+      isDegraded = true;
+    }
+
+    // Check Behavioral Biometric
+    try {
+      if (behavioralService) {
+        const stats = behavioralService.getServiceStats();
+        health.services.behavioralBiometric = 'Running';
+      } else {
+        health.services.behavioralBiometric = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.behavioralBiometric = 'Error';
+      isDegraded = true;
+    }
+
     if (isDegraded) {
       health.status = 'Degraded';
     }
@@ -478,7 +530,7 @@ function createApp(dependencies = {}) {
   });
 
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
-  
+
   // Global error handler with Sentry integration
   app.use((err, req, res, next) => {
     // Log error with structured logging
@@ -489,15 +541,15 @@ function createApp(dependencies = {}) {
       walletAddress: req.user?.publicKey || req.body?.walletAddress,
       endpoint: req.originalUrl,
     };
-    
+
     // Capture with Sentry
     errorTracking.captureException(err, errorContext);
-    
+
     // Return error response
     res.status(err.statusCode || err.status || 500).json({
       success: false,
-      error: process.env.NODE_ENV === 'production' 
-        ? 'Internal server error' 
+      error: process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
         : err.message,
       ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
     });

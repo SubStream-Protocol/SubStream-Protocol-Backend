@@ -24,10 +24,13 @@ const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
 const GlobalStatsService = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
+const CollaborationRevenueService = require('./services/collaborationRevenueService');
+const CollaborationWatchTimeMiddleware = require('./middleware/collaborationWatchTime');
 const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
 const createDeviceRoutes = require('./routes/device');
 const createSwaggerRoutes = require('./routes/swagger');
+const createCollaborationRoutes = require('./routes/collaborations');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -66,7 +69,7 @@ function createApp(dependencies = {}) {
       notificationService,
       emailUtil: { sendEmail },
     });
-    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
+  dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
   const subscriptionExpiryChecker =
     dependencies.subscriptionExpiryChecker ||
     new SubscriptionExpiryChecker({
@@ -110,6 +113,14 @@ function createApp(dependencies = {}) {
 
   const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
 
+  // Initialize social token gating service and middleware
+  const socialTokenService = dependencies.socialTokenService || new SocialTokenGatingService(config, database, getRedisClient());
+  const socialTokenMiddleware = dependencies.socialTokenMiddleware || new SocialTokenGatingMiddleware(socialTokenService, database, getRedisClient());
+
+  // Initialize collaboration revenue service and watch time middleware
+  const collaborationService = dependencies.collaborationService || new CollaborationRevenueService(config, database, getRedisClient());
+  const collaborationWatchTimeMiddleware = dependencies.collaborationWatchTimeMiddleware || new CollaborationWatchTimeMiddleware(collaborationService, database);
+
   // Initialize global stats service and worker
   const globalStatsService = dependencies.globalStatsService || new GlobalStatsService(database);
   const globalStatsWorker = dependencies.globalStatsWorker || new GlobalStatsWorker(database, {
@@ -130,6 +141,8 @@ function createApp(dependencies = {}) {
   app.set('globalStatsWorker', globalStatsWorker);
   app.set('subdomainService', subdomainService);
   app.set('sslCertificateService', sslCertificateService);
+  app.set('collaborationService', collaborationService);
+  app.set('collaborationWatchTimeMiddleware', collaborationWatchTimeMiddleware);
 
   // Initialize and start predictive churn analysis worker
   const { PredictiveChurnAnalysisWorker } = require('./src/services/predictiveChurnAnalysisWorker');
@@ -148,16 +161,22 @@ function createApp(dependencies = {}) {
 
   app.use(cors());
   app.use(express.json());
-  
+
 
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
-  
+
+  // Social token gating endpoints
+  app.use('/api/social-token', createSocialTokenRoutes());
+
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
-  
+
+  // Creator collaboration endpoints
+  app.use('/api/collaborations', createCollaborationRoutes());
+
   // Subdomain management endpoints
   app.use('/api/subdomains', createSubdomainRoutes({ database, config, subdomainService, sslCertificateService }));
 
@@ -487,7 +506,7 @@ function createApp(dependencies = {}) {
   });
 
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
-  
+
   // Global error handler with Sentry integration
   app.use((err, req, res, next) => {
     // Log error with structured logging
@@ -498,15 +517,15 @@ function createApp(dependencies = {}) {
       walletAddress: req.user?.publicKey || req.body?.walletAddress,
       endpoint: req.originalUrl,
     };
-    
+
     // Capture with Sentry
     errorTracking.captureException(err, errorContext);
-    
+
     // Return error response
     res.status(err.statusCode || err.status || 500).json({
       success: false,
-      error: process.env.NODE_ENV === 'production' 
-        ? 'Internal server error' 
+      error: process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
         : err.message,
       ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
     });

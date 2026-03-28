@@ -24,10 +24,13 @@ const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
 const GlobalStatsService = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
+const FederationService = require('./services/federationService');
+const FederationWorker = require('./src/services/federationWorker');
 const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
 const createDeviceRoutes = require('./routes/device');
 const createSwaggerRoutes = require('./routes/swagger');
+const createActivityPubRoutes = require('./routes/activityPub');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -66,7 +69,7 @@ function createApp(dependencies = {}) {
       notificationService,
       emailUtil: { sendEmail },
     });
-    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
+  dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
   const subscriptionExpiryChecker =
     dependencies.subscriptionExpiryChecker ||
     new SubscriptionExpiryChecker({
@@ -77,10 +80,18 @@ function createApp(dependencies = {}) {
   // Initialize background worker service for async processing
   const backgroundWorker = dependencies.backgroundWorker || new BackgroundWorkerService(config.rabbitmq);
 
+  // Initialize federation service for ActivityPub integration
+  const federationService = dependencies.federationService || new FederationService(config, database, backgroundWorker);
+
+  // Initialize federation worker for background processing
+  const federationWorker = dependencies.federationWorker || new FederationWorker(config, database, federationService);
+
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
   app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
   app.set('backgroundWorker', backgroundWorker);
+  app.set('federationService', federationService);
+  app.set('federationWorker', federationWorker);
 
   // Start background worker if RabbitMQ is configured
   if (config.rabbitmq && (config.rabbitmq.url || config.rabbitmq.host)) {
@@ -146,24 +157,34 @@ function createApp(dependencies = {}) {
     console.error('Failed to start global stats worker:', error);
   });
 
+  // Start federation worker if ActivityPub is enabled
+  if (config.activityPub?.enabled !== false) {
+    federationWorker.start().catch(error => {
+      console.error('Failed to start federation worker:', error);
+    });
+  }
+
   app.use(cors());
   app.use(express.json());
-  
+
 
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
-  
+
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
-  
+
   // Subdomain management endpoints
   app.use('/api/subdomains', createSubdomainRoutes({ database, config, subdomainService, sslCertificateService }));
 
   // Price feed endpoints
   const createPriceRouter = require('./routes/price');
   app.use('/api/price-feed', createPriceRouter());
+
+  // ActivityPub federation endpoints
+  app.use('/', createActivityPubRoutes());
 
   app.use((req, res, next) => {
     req.config = config;
@@ -487,7 +508,7 @@ function createApp(dependencies = {}) {
   });
 
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
-  
+
   // Global error handler with Sentry integration
   app.use((err, req, res, next) => {
     // Log error with structured logging
@@ -498,15 +519,15 @@ function createApp(dependencies = {}) {
       walletAddress: req.user?.publicKey || req.body?.walletAddress,
       endpoint: req.originalUrl,
     };
-    
+
     // Capture with Sentry
     errorTracking.captureException(err, errorContext);
-    
+
     // Return error response
     res.status(err.statusCode || err.status || 500).json({
       success: false,
-      error: process.env.NODE_ENV === 'production' 
-        ? 'Internal server error' 
+      error: process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
         : err.message,
       ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
     });

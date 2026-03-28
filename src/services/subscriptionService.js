@@ -9,11 +9,17 @@ class SubscriptionService extends EventEmitter {
   /**
    * @param {{database: import('../db/appDatabase').AppDatabase, auditLogService?: any, config?: any}} options
    */
+  /**
+   * @param {{database: import('../db/appDatabase').AppDatabase, auditLogService?: any, notificationService?: any, emailUtil?: any}} options
+   */
+  constructor({ database, auditLogService, notificationService, emailUtil } = {}) {
   constructor({ database, auditLogService, config } = {}) {
     super();
     if (!database) throw new Error('database is required');
     this.database = database;
     this.auditLogService = auditLogService || null;
+    this.notificationService = notificationService || null;
+    this.emailUtil = emailUtil || null;
     this.config = config;
     this.eventPublisher = config ? new EventPublisherService(config.rabbitmq) : null;
   }
@@ -38,6 +44,27 @@ class SubscriptionService extends EventEmitter {
           const result = this.database.createOrActivateSubscription(creatorId, String(event.walletAddress));
           newCount = result.count;
           if (result.changed) this.emit('subscribed', { creatorId, newCount, walletAddress: event.walletAddress });
+
+          // Notify creator (in-app notification)
+          if (this.notificationService) {
+            this.notificationService.addNotification(creatorId, {
+              type: 'new_fan',
+              message: `You have a new subscriber! (Tier: Gold)`,
+              metadata: { walletAddress: event.walletAddress, tier: 'gold' },
+              timestamp: event.timestamp || new Date().toISOString(),
+            });
+          }
+
+          // Email notification
+          if (this.emailUtil) {
+            // Lookup creator email (stub: use creatorId as email for demo)
+            const to = creatorId.includes('@') ? creatorId : `${creatorId}@example.com`;
+            this.emailUtil.sendEmail({
+              to,
+              subject: 'New Subscriber! (Tier: Gold)',
+              text: `Congratulations! You have a new Gold tier subscriber.`,
+            }).catch(() => {}); // Don't block on email errors
+          }
         } else {
           // fallback to simple increment if wallet address not provided
           newCount = this.database.incrementCreatorSubscriberCount(creatorId);

@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const { v4: uuidv4 } = require('uuid');
+const AutomatedCopyrightFingerprintingService = require('../src/services/automatedCopyrightFingerprintingService');
 
 const router = express.Router();
 
@@ -34,6 +35,8 @@ const upload = multer({
 });
 
 function createVideoRoutes(config, database, videoWorker) {
+  const fingerprintingService = new AutomatedCopyrightFingerprintingService(database);
+
   router.post('/upload', upload.single('video'), async (req, res) => {
     try {
       if (!req.file) {
@@ -53,6 +56,10 @@ function createVideoRoutes(config, database, videoWorker) {
       }
 
       const videoId = uuidv4();
+
+      await fingerprintingService.ensureSchema();
+      const perceptualHash = await fingerprintingService.generatePerceptualHash(req.file.path);
+      const protectedHashMatch = await fingerprintingService.findProtectedMatch(perceptualHash);
       
       await database.run(
         `INSERT INTO videos 
@@ -69,6 +76,43 @@ function createVideoRoutes(config, database, videoWorker) {
           visibility
         ]
       );
+
+      if (protectedHashMatch) {
+        await database.run(
+          `UPDATE videos
+           SET status = ?, message = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            'flagged_for_review',
+            'Potential copyright match detected. Upload flagged for manual review.',
+            videoId,
+          ],
+        );
+
+        await fingerprintingService.recordFingerprint({
+          videoId,
+          phash: perceptualHash,
+          matchedProtectedHashId: protectedHashMatch.id,
+          status: 'flagged_for_review',
+        });
+
+        return res.status(202).json({
+          success: true,
+          data: {
+            videoId,
+            title,
+            status: 'flagged_for_review',
+            message: 'Upload flagged for manual review due to copyright fingerprint match.',
+          },
+        });
+      }
+
+      await fingerprintingService.recordFingerprint({
+        videoId,
+        phash: perceptualHash,
+        matchedProtectedHashId: null,
+        status: 'uploaded',
+      });
 
       const transcodingJob = await videoWorker.addTranscodingJob(
         videoId,

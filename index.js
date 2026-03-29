@@ -30,13 +30,13 @@ const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
 const { GlobalStatsService } = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
-const SocialTokenGatingService = require('./services/socialTokenGatingService');
-const SocialTokenGatingMiddleware = require('./middleware/socialTokenGating');
+const CollaborationRevenueService = require('./services/collaborationRevenueService');
+const CollaborationWatchTimeMiddleware = require('./middleware/collaborationWatchTime');
 const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
 const createDeviceRoutes = require('./routes/device');
 const createSwaggerRoutes = require('./routes/swagger');
-const createSocialTokenRoutes = require('./routes/socialToken');
+const createCollaborationRoutes = require('./routes/collaborations');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -148,14 +148,13 @@ function createApp(dependencies = {}) {
 
   const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
 
-  // Initialize leaderboard service and worker
-  const redisClient = getRedisClient();
-  const leaderboardService = dependencies.leaderboardService || new EngagementLeaderboardService(config, database, redisClient);
-  const leaderboardWorker = dependencies.leaderboardWorker || new LeaderboardWorker(config, database, redisClient, leaderboardService);
-
   // Initialize social token gating service and middleware
-  const socialTokenService = dependencies.socialTokenService || new SocialTokenGatingService(config, database, redisClient);
-  const socialTokenMiddleware = dependencies.socialTokenMiddleware || new SocialTokenGatingMiddleware(socialTokenService, database, redisClient);
+  const socialTokenService = dependencies.socialTokenService || new SocialTokenGatingService(config, database, getRedisClient());
+  const socialTokenMiddleware = dependencies.socialTokenMiddleware || new SocialTokenGatingMiddleware(socialTokenService, database, getRedisClient());
+
+  // Initialize collaboration revenue service and watch time middleware
+  const collaborationService = dependencies.collaborationService || new CollaborationRevenueService(config, database, getRedisClient());
+  const collaborationWatchTimeMiddleware = dependencies.collaborationWatchTimeMiddleware || new CollaborationWatchTimeMiddleware(collaborationService, database);
 
   // Initialize global stats service and worker
   const globalStatsService = dependencies.globalStatsService || new GlobalStatsService(database);
@@ -186,6 +185,8 @@ function createApp(dependencies = {}) {
   app.set('socialTokenMiddleware', socialTokenMiddleware);
   app.set('subdomainService', subdomainService);
   app.set('sslCertificateService', sslCertificateService);
+  app.set('collaborationService', collaborationService);
+  app.set('collaborationWatchTimeMiddleware', collaborationWatchTimeMiddleware);
 
   // Initialize and start predictive churn analysis worker
   const { PredictiveChurnAnalysisWorker } = require('./src/services/predictiveChurnAnalysisWorker');
@@ -218,8 +219,14 @@ function createApp(dependencies = {}) {
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
 
+  // Social token gating endpoints
+  app.use('/api/social-token', createSocialTokenRoutes());
+
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
+
+  // Creator collaboration endpoints
+  app.use('/api/collaborations', createCollaborationRoutes());
 
   // Subdomain management endpoints
   app.use('/api/subdomains', createSubdomainRoutes({ database, config, subdomainService, sslCertificateService }));

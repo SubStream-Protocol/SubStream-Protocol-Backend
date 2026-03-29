@@ -20,9 +20,15 @@ const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
 const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
+const { IPIntelligenceService } = require('./src/services/ipIntelligenceService');
+const { IPBlockingService } = require('./src/services/ipBlockingService');
+const { IPMonitoringService } = require('./src/services/ipMonitoringService');
+const { IPIntelligenceMiddleware } = require('./src/middleware/ipIntelligenceMiddleware');
+const { BehavioralBiometricService } = require('./src/services/behavioralBiometricService');
+const { BotDetectionClassifier } = require('./src/services/botDetectionClassifier');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
-const GlobalStatsService = require('./src/services/globalStatsService');
+const { GlobalStatsService } = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
 const FederationService = require('./services/federationService');
 const FederationWorker = require('./src/services/federationWorker');
@@ -93,11 +99,43 @@ function createApp(dependencies = {}) {
   app.set('federationService', federationService);
   app.set('federationWorker', federationWorker);
 
-  // Start background worker if RabbitMQ is configured
-  if (config.rabbitmq && (config.rabbitmq.url || config.rabbitmq.host)) {
-    backgroundWorker.start().catch(error => {
-      console.error('Failed to start background worker:', error);
+  // Initialize and start AML scanner if enabled
+  let amlScannerWorker = null;
+  if (config.aml && config.aml.enabled) {
+    amlScannerWorker = dependencies.amlScannerWorker || new AMLScannerWorker(database, config.aml);
+    app.set('amlScannerWorker', amlScannerWorker);
+
+    amlScannerWorker.start().catch(error => {
+      console.error('Failed to start AML scanner worker:', error);
     });
+
+    console.log('AML Scanner Worker initialized');
+  }
+
+  // Initialize IP intelligence services if enabled
+  let ipIntelligenceService = null;
+  let ipBlockingService = null;
+  let ipMonitoringService = null;
+  let ipMiddleware = null;
+
+  if (config.ipIntelligence && config.ipIntelligence.enabled) {
+    ipIntelligenceService = dependencies.ipIntelligenceService || new IPIntelligenceService(config.ipIntelligence);
+    ipBlockingService = dependencies.ipBlockingService || new IPBlockingService(database, config.ipIntelligence);
+    ipMonitoringService = dependencies.ipMonitoringService || new IPMonitoringService(database, config.ipIntelligence);
+    ipMiddleware = new IPIntelligenceMiddleware(ipIntelligenceService, config.ipIntelligence);
+
+    // Expose services on the express app
+    app.set('ipIntelligenceService', ipIntelligenceService);
+    app.set('ipBlockingService', ipBlockingService);
+    app.set('ipMonitoringService', ipMonitoringService);
+    app.set('ipIntelligenceMiddleware', ipMiddleware);
+
+    // Start IP monitoring service
+    ipMonitoringService.start().catch(error => {
+      console.error('Failed to start IP monitoring service:', error);
+    });
+
+    console.log('IP Intelligence services initialized');
   }
 
   const dayInMs = 24 * 60 * 60 * 1000;
@@ -433,6 +471,22 @@ function createApp(dependencies = {}) {
   // API Documentation with Swagger UI
   app.use('/api/docs', createSwaggerRoutes);
 
+  // IP Intelligence management routes
+  if (ipIntelligenceService) {
+    app.use('/api/ip-intelligence', createIPIntelligenceRoutes({
+      ipIntelligenceService,
+      ipBlockingService,
+      ipMonitoringService
+    }));
+  }
+
+  // Behavioral biometric management routes
+  if (behavioralService) {
+    app.use('/api/behavioral', createBehavioralBiometricRoutes({
+      behavioralService
+    }));
+  }
+
   // Health check endpoint
   app.get('/health', async (req, res) => {
     const health = {
@@ -444,6 +498,8 @@ function createApp(dependencies = {}) {
         redis: 'Unknown',
         rabbitmq: 'Unknown',
         stellar: 'Unknown',
+        ipIntelligence: 'Unknown',
+        behavioralBiometric: 'Unknown'
       },
     };
 
@@ -497,6 +553,32 @@ function createApp(dependencies = {}) {
       }
     } catch (error) {
       health.services.stellar = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check IP Intelligence
+    try {
+      if (ipIntelligenceService) {
+        const stats = ipIntelligenceService.getServiceStats();
+        health.services.ipIntelligence = 'Running';
+      } else {
+        health.services.ipIntelligence = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.ipIntelligence = 'Error';
+      isDegraded = true;
+    }
+
+    // Check Behavioral Biometric
+    try {
+      if (behavioralService) {
+        const stats = behavioralService.getServiceStats();
+        health.services.behavioralBiometric = 'Running';
+      } else {
+        health.services.behavioralBiometric = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.behavioralBiometric = 'Error';
       isDegraded = true;
     }
 

@@ -1,10 +1,8 @@
-const express = require("express");
-const cors = require("cors");
-const dotenv = require("dotenv");
-require('dotenv').config();
-
-const cors = require('cors');
 const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const { AppDatabase } = require('./src/db/appDatabase');
 const { loadConfig } = require('./src/config');
@@ -17,6 +15,9 @@ const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
 
+// Tier middleware — attaches req.user.tier to every request
+const { attachTier } = require('./middleware/tierAuth');
+
 /**
  * Create the Express application with injectable services for testing.
  *
@@ -27,34 +28,80 @@ function createApp(dependencies = {}) {
   const app = express();
   const config = dependencies.config || loadConfig();
   const database = dependencies.database || new AppDatabase(config.database.filename);
-  const auditLogService = dependencies.auditLogService || new CreatorAuditLogService(database);
+  const auditLogService =
+    dependencies.auditLogService || new CreatorAuditLogService(database);
   const creatorActionService =
-    dependencies.creatorActionService || new CreatorActionService(database, auditLogService);
-  const creatorAuthService = dependencies.creatorAuthService || new CreatorAuthService(config);
+    dependencies.creatorActionService ||
+    new CreatorActionService(database, auditLogService);
+  const creatorAuthService =
+    dependencies.creatorAuthService || new CreatorAuthService(config);
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
 
+  // ── Global middleware ──────────────────────────────────────────────────────
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true }));
 
+  // Attach req.user = { address, tier } to every request.
+  // Never rejects — unauthenticated requests get tier = 'guest'.
+  app.use(attachTier);
+
+  // ── Health / root ──────────────────────────────────────────────────────────
   app.get('/', (req, res) => {
     res.json({
       project: 'SubStream Protocol',
       status: 'Active',
       contract: config.soroban.contractId,
+      version: '1.0.0',
+      endpoints: {
+        auth: '/auth',
+        content: '/content',
+        analytics: '/analytics',
+        storage: '/storage',
+        posts: '/posts',
+        health: '/health',
+      },
     });
   });
 
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      services: {
+        auth: 'active',
+        content: 'active',
+        analytics: 'active',
+        storage: 'active',
+        posts: 'active',
+      },
+    });
+  });
+
+  // ── Auth routes ────────────────────────────────────────────────────────────
+  app.use('/auth', require('./routes/auth'));
+  app.use('/auth', require('./routes/stellarAuth'));
+
+  // ── Tier-gated content routes ──────────────────────────────────────────────
+  // attachTier already ran globally; routes/content.js uses requireTier
+  // on individual endpoints as needed.
+  app.use('/content', require('./routes/content'));
+
+  // ── Other feature routes ───────────────────────────────────────────────────
+  app.use('/analytics', require('./routes/analytics'));
+  app.use('/storage', require('./routes/storage'));
+  app.use('/posts', require('./routes/posts'));
+
+  // ── CDN token endpoints ────────────────────────────────────────────────────
   app.post('/api/cdn/token', async (req, res) => {
     const requiredFields = ['walletAddress', 'creatorAddress', 'contentId', 'segmentPath'];
     const missingFields = requiredFields.filter((field) => !req.body?.[field]);
 
     if (missingFields.length > 0) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        missingFields,
-      });
+      return res.status(400).json({ error: 'Missing required fields', missingFields });
     }
 
     try {
@@ -133,24 +180,27 @@ function createApp(dependencies = {}) {
     }
   });
 
-  app.patch('/api/creator/flow-rate', requireCreatorAuth(creatorAuthService), async (req, res) => {
-    if (!isPresent(req.body?.flowRate)) {
-      return res.status(400).json({ success: false, error: 'flowRate is required' });
-    }
-
-    try {
-      const result = creatorActionService.updateFlowRate({
-        creatorId: req.creator.id,
-        flowRate: normalizeScalar(req.body.flowRate),
-        currency: isPresent(req.body.currency) ? String(req.body.currency) : null,
-        ipAddress: getRequestIp(req),
-      });
-
-      return res.status(200).json({ success: true, data: result });
-    } catch (error) {
-      return handleActionError(res, error);
-    }
-  });
+  // ── Creator action endpoints ───────────────────────────────────────────────
+  app.patch(
+    '/api/creator/flow-rate',
+    requireCreatorAuth(creatorAuthService),
+    async (req, res) => {
+      if (!isPresent(req.body?.flowRate)) {
+        return res.status(400).json({ success: false, error: 'flowRate is required' });
+      }
+      try {
+        const result = creatorActionService.updateFlowRate({
+          creatorId: req.creator.id,
+          flowRate: normalizeScalar(req.body.flowRate),
+          currency: isPresent(req.body.currency) ? String(req.body.currency) : null,
+          ipAddress: getRequestIp(req),
+        });
+        return res.status(200).json({ success: true, data: result });
+      } catch (error) {
+        return handleActionError(res, error);
+      }
+    },
+  );
 
   app.patch(
     '/api/creator/videos/:videoId/visibility',
@@ -159,7 +209,6 @@ function createApp(dependencies = {}) {
       if (!isPresent(req.body?.visibility)) {
         return res.status(400).json({ success: false, error: 'visibility is required' });
       }
-
       try {
         const result = creatorActionService.updateVideoVisibility({
           creatorId: req.creator.id,
@@ -167,7 +216,6 @@ function createApp(dependencies = {}) {
           visibility: String(req.body.visibility),
           ipAddress: getRequestIp(req),
         });
-
         return res.status(200).json({ success: true, data: result });
       } catch (error) {
         return handleActionError(res, error);
@@ -184,7 +232,6 @@ function createApp(dependencies = {}) {
           .status(400)
           .json({ success: false, error: 'splits must be a non-empty array' });
       }
-
       try {
         const result = creatorActionService.updateCoopSplit({
           creatorId: req.creator.id,
@@ -192,7 +239,6 @@ function createApp(dependencies = {}) {
           splits: req.body.splits,
           ipAddress: getRequestIp(req),
         });
-
         return res.status(200).json({ success: true, data: result });
       } catch (error) {
         return handleActionError(res, error);
@@ -200,82 +246,79 @@ function createApp(dependencies = {}) {
     },
   );
 
-  app.get('/api/creator/audit-log', requireCreatorAuth(creatorAuthService), (req, res) => {
-    const logs = auditLogService.listByCreatorId(req.creator.id);
-    return res.status(200).json({ success: true, data: logs });
-  });
+  app.get(
+    '/api/creator/audit-log',
+    requireCreatorAuth(creatorAuthService),
+    (req, res) => {
+      const logs = auditLogService.listByCreatorId(req.creator.id);
+      return res.status(200).json({ success: true, data: logs });
+    },
+  );
 
-  app.get('/api/creator/audit-log/export', requireCreatorAuth(creatorAuthService), (req, res) => {
-    const format = String(req.query.format || '').toLowerCase();
+  app.get(
+    '/api/creator/audit-log/export',
+    requireCreatorAuth(creatorAuthService),
+    (req, res) => {
+      const format = String(req.query.format || '').toLowerCase();
 
-    if (!['csv', 'pdf'].includes(format)) {
-      return res.status(400).json({
-        success: false,
-        error: 'format must be one of: csv, pdf',
+      if (!['csv', 'pdf'].includes(format)) {
+        return res.status(400).json({ success: false, error: 'format must be one of: csv, pdf' });
+      }
+
+      const logs = auditLogService.listByCreatorId(req.creator.id);
+      const exportTimestamp = new Date().toISOString();
+
+      if (format === 'csv') {
+        const csv = buildAuditLogCsv(logs);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="creator-audit-log-${req.creator.id}.csv"`,
+        );
+        return res.status(200).send(csv);
+      }
+
+      const pdf = buildAuditLogPdf({
+        creatorId: req.creator.id,
+        exportedAt: exportTimestamp,
+        logs,
       });
-    }
-
-    const logs = auditLogService.listByCreatorId(req.creator.id);
-    const exportTimestamp = new Date().toISOString();
-
-    if (format === 'csv') {
-      const csv = buildAuditLogCsv(logs);
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Type', 'application/pdf');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="creator-audit-log-${req.creator.id}.csv"`,
+        `attachment; filename="creator-audit-log-${req.creator.id}.pdf"`,
       );
-      return res.status(200).send(csv);
-    }
+      return res.status(200).send(pdf);
+    },
+  );
 
-    const pdf = buildAuditLogPdf({
-      creatorId: req.creator.id,
-      exportedAt: exportTimestamp,
-      logs,
-    });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="creator-audit-log-${req.creator.id}.pdf"`,
-    );
-    return res.status(200).send(pdf);
+  // ── Error handlers ─────────────────────────────────────────────────────────
+  app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   });
 
-  app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
+  app.use((req, res) => {
+    res.status(404).json({ success: false, error: 'Endpoint not found' });
+  });
 
   return app;
 }
 
-/**
- * Read a bearer token from the request.
- *
- * @param {import('express').Request} req The current request.
- * @returns {string|null}
- */
+// ── Private helpers ────────────────────────────────────────────────────────
+
 function extractToken(req) {
   const authHeader = req.headers.authorization || '';
-
-  if (authHeader.startsWith('Bearer ')) {
-    return authHeader.slice('Bearer '.length).trim();
-  }
-
+  if (authHeader.startsWith('Bearer ')) return authHeader.slice('Bearer '.length).trim();
   return req.query.token || req.body?.token || null;
 }
 
-/**
- * Build creator auth middleware from the configured auth service.
- *
- * @param {CreatorAuthService} creatorAuthService Authentication service.
- * @returns {import('express').RequestHandler}
- */
 function requireCreatorAuth(creatorAuthService) {
   return (req, res, next) => {
     const token = extractToken(req);
-
     if (!token) {
       return res.status(401).json({ success: false, error: 'Authentication required' });
     }
-
     try {
       req.creator = creatorAuthService.verifyToken(token);
       return next();
@@ -285,131 +328,24 @@ function requireCreatorAuth(creatorAuthService) {
   };
 }
 
-/**
- * Normalize scalar request values to strings for durable storage.
- *
- * @param {string|number|boolean} value The value to normalize.
- * @returns {string}
- */
 function normalizeScalar(value) {
   return String(value).trim();
 }
 
-/**
- * Check whether a value is present in a request body.
- *
- * @param {unknown} value Value to inspect.
- * @returns {boolean}
- */
 function isPresent(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
-/**
- * Send a consistent JSON error payload for creator actions.
- *
- * @param {import('express').Response} res The response object.
- * @param {Error & {statusCode?: number}} error The thrown error.
- * @returns {import('express').Response}
- */
 function handleActionError(res, error) {
   return res
     .status(error.statusCode || 500)
     .json({ success: false, error: error.message || 'Request failed' });
 }
 
+// ── Bootstrap ──────────────────────────────────────────────────────────────
+
 const app = createApp();
 const port = Number(process.env.PORT || 3000);
-
-if (require.main === module) {
-  app.listen(port, () => console.log(`SubStream API running on port ${port}`));
-const cors = require('cors');
-const dotenv = require('dotenv');
-
-// Load environment variables
-dotenv.config();
-
-const app = express();
-const port = process.env.PORT || 3000;
-
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-// Routes
-app.use('/auth', require('./routes/auth'));
-app.use('/content', require('./routes/content'));
-app.use('/analytics', require('./routes/analytics'));
-app.use('/storage', require('./routes/storage'));
-app.use('/posts', require('./routes/posts'));
-app.use("/auth", require("./routes/auth"));
-app.use("/auth", require("./routes/stellarAuth"));
-app.use("/content", require("./routes/content"));
-app.use("/analytics", require("./routes/analytics"));
-app.use("/storage", require("./routes/storage"));
-
-// Health check endpoint
-app.get("/health", (req, res) => {
-  res.json({
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    version: "1.0.0",
-    services: {
-      auth: 'active',
-      content: 'active',
-      analytics: 'active',
-      storage: 'active',
-      posts: 'active'
-    }
-      auth: "active",
-      content: "active",
-      analytics: "active",
-      storage: "active",
-    },
-  });
-});
-
-// Root endpoint
-app.get("/", (req, res) => {
-  res.json({
-    project: "SubStream Protocol",
-    status: "Active",
-    contract: "CAOUX2FZ65IDC4F2X7LJJ2SVF23A35CCTZB7KVVN475JCLKTTU4CEY6L",
-    version: "1.0.0",
-    endpoints: {
-      auth: '/auth',
-      content: '/content',
-      analytics: '/analytics',
-      storage: '/storage',
-      posts: '/posts',
-      health: '/health'
-    }
-      auth: "/auth",
-      content: "/content",
-      analytics: "/analytics",
-      storage: "/storage",
-      health: "/health",
-    },
-  });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
-  res.status(500).json({
-    success: false,
-    error: "Internal server error",
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: "Endpoint not found",
-  });
-});
 
 if (require.main === module) {
   app.listen(port, () => {

@@ -1,321 +1,169 @@
+/**
+ * @module routes/content
+ * @description Tier-gated content endpoints for the SubStream Protocol.
+ *
+ * `attachTier` runs globally in index.js, so `req.user.tier` is always
+ * populated before any handler here runs.
+ *
+ * Endpoint summary:
+ *
+ *   GET /content                 List all content; items above the user's
+ *                                tier are returned as censored previews.
+ *
+ *   GET /content/tier-status     Current user's tier info + upgrade hints.
+ *                                Frontend uses this to render upgrade UI.
+ *
+ *   GET /content/:id             Single item — full or censored depending
+ *                                on the user's tier vs the content's tier.
+ *
+ *   GET /content/tier/bronze     All bronze-tier content (requires bronze+)
+ *   GET /content/tier/silver     All silver-tier content (requires silver+)
+ *   GET /content/tier/gold       All gold-tier content  (requires gold)
+ */
+
 const express = require('express');
 const router = express.Router();
+
+const { requireTier } = require('../middleware/tierAuth');
+const tierService = require('../services/tierService');
 const contentService = require('../services/contentService');
-const { authenticateToken, requireTier } = require('../middleware/auth');
 
-// Get content by ID with tier-based filtering
-router.get('/:contentId', authenticateToken, (req, res) => {
+// ── Open endpoints (tier filtering applied inside, not at the gate) ─────────
+
+/**
+ * GET /content
+ *
+ * Returns every content item the platform has.
+ * - Items the user can access: returned in full with `locked: false`
+ * - Items above the user's tier: returned as censored previews with
+ *   `locked: true`, `contentUrl: null`, and an `upgrade` hint string.
+ *
+ * This lets the frontend show a unified catalogue where locked items
+ * are visually greyed out but still discoverable.
+ */
+router.get('/', async (req, res) => {
   try {
-    const { contentId } = req.params;
-    const content = contentService.getContent(contentId, req.user.address);
+    const userTier = req.user?.tier || 'guest';
+    const allContent = await contentService.getAllContent();
+    const filtered = tierService.filterContentList(allContent, userTier);
 
-    res.json({
+    return res.json({
       success: true,
-      content
+      tier: userTier,
+      total: filtered.length,
+      unlocked: filtered.filter((i) => !i.locked).length,
+      locked: filtered.filter((i) => i.locked).length,
+      items: filtered,
     });
-
-  } catch (error) {
-    console.error('Get content error:', error);
-    res.status(404).json({
-      success: false,
-      error: error.message || 'Content not found'
-    });
+  } catch (err) {
+    console.error('[content] GET / error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch content' });
   }
 });
 
-// List content with tier-based filtering
-router.get('/', authenticateToken, (req, res) => {
+/**
+ * GET /content/tier-status
+ *
+ * Returns the current user's tier rank, access map, next tier, and
+ * an upgrade message. Intended for tier management / upgrade UI.
+ *
+ * Example response:
+ * {
+ *   current: 'bronze',
+ *   rank: 1,
+ *   canAccess: { guest: true, bronze: true, silver: false, gold: false },
+ *   nextTier: 'silver',
+ *   upgradeMessage: 'Upgrade to Silver to unlock more content.'
+ * }
+ */
+router.get('/tier-status', (req, res) => {
+  const userTier = req.user?.tier || 'guest';
+  return res.json({ success: true, ...tierService.tierStatus(userTier) });
+});
+
+// ── Tier-gated list endpoints ───────────────────────────────────────────────
+
+/**
+ * GET /content/tier/bronze
+ * Returns only bronze-tier content. Requires bronze subscription or above.
+ * Guests receive a 403 with an upgrade suggestion.
+ */
+router.get('/tier/bronze', requireTier('bronze'), async (req, res) => {
   try {
-    const filters = {
-      creator: req.query.creator,
-      tags: req.query.tags ? req.query.tags.split(',') : [],
-      search: req.query.search,
-      tier: req.query.tier
-    };
-
-    const contentList = contentService.listContent(req.user.address, filters);
-
-    res.json({
-      success: true,
-      content: contentList,
-      count: contentList.length,
-      filters
-    });
-
-  } catch (error) {
-    console.error('List content error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to list content'
-    });
+    const items = await contentService.getContentByTier('bronze');
+    return res.json({ success: true, tier: 'bronze', total: items.length, items });
+  } catch (err) {
+    console.error('[content] GET /tier/bronze error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch bronze content' });
   }
 });
 
-// Create new content (creator only)
-router.post('/', authenticateToken, requireTier('bronze'), async (req, res) => {
+/**
+ * GET /content/tier/silver
+ * Returns only silver-tier content. Requires silver subscription or above.
+ */
+router.get('/tier/silver', requireTier('silver'), async (req, res) => {
   try {
-    const {
-      title,
-      description,
-      requiredTier = 'bronze',
-      thumbnail,
-      duration,
-      price,
-      tags,
-      federate = true // Allow creators to opt-out of federation
-    } = req.body;
+    const items = await contentService.getContentByTier('silver');
+    return res.json({ success: true, tier: 'silver', total: items.length, items });
+  } catch (err) {
+    console.error('[content] GET /tier/silver error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch silver content' });
+  }
+});
 
-    if (!title || !description) {
-      return res.status(400).json({
+/**
+ * GET /content/tier/gold
+ * Returns only gold-tier content. Requires gold subscription.
+ */
+router.get('/tier/gold', requireTier('gold'), async (req, res) => {
+  try {
+    const items = await contentService.getContentByTier('gold');
+    return res.json({ success: true, tier: 'gold', total: items.length, items });
+  } catch (err) {
+    console.error('[content] GET /tier/gold error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch gold content' });
+  }
+});
+
+// ── Single-item endpoint (must come after /tier/* routes) ───────────────────
+
+/**
+ * GET /content/:id
+ *
+ * Returns a single content item by ID.
+ *
+ * - If the user's tier meets the content requirement: full item returned.
+ * - If the user's tier is too low: 403 with a censored preview so the
+ *   frontend can still render something meaningful (thumbnail, title,
+ *   truncated description, upgrade suggestion).
+ *
+ * IMPORTANT: this route is defined AFTER /tier-status and /tier/* so
+ * Express does not accidentally match those paths as :id values.
+ */
+router.get('/:id', async (req, res) => {
+  try {
+    const userTier = req.user?.tier || 'guest';
+    const content = await contentService.getContentById(req.params.id);
+
+    if (!content) {
+      return res.status(404).json({ success: false, error: 'Content not found' });
+    }
+
+    if (!tierService.canAccess(userTier, content.tier)) {
+      return res.status(403).json({
         success: false,
-        error: 'Title and description are required'
+        error: 'Insufficient subscription tier',
+        required: content.tier,
+        current: userTier,
+        preview: tierService.censorContent(content, userTier),
       });
     }
 
-    const content = contentService.addContent({
-      title,
-      description,
-      requiredTier,
-      thumbnail,
-      duration: parseFloat(duration),
-      price,
-      tags: tags || []
-    }, req.user.address);
-
-    // Queue content for ActivityPub federation if enabled
-    if (federate && req.app.get('federationService')) {
-      try {
-        await req.app.get('federationService').queueContentForFederation(content);
-      } catch (federationError) {
-        // Log error but don't fail content creation
-        console.error('Federation queue error:', federationError);
-      }
-    }
-
-    res.status(201).json({
-      success: true,
-      content
-    });
-
-  } catch (error) {
-    console.error('Create content error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to create content'
-    });
-  }
-});
-
-// Update content (creator only)
-router.put('/:contentId', authenticateToken, (req, res) => {
-  try {
-    const { contentId } = req.params;
-    const updates = req.body;
-
-    // Don't allow updating creator or creation date
-    delete updates.creator;
-    delete updates.createdAt;
-
-    const updatedContent = contentService.updateContent(contentId, updates, req.user.address);
-
-    res.json({
-      success: true,
-      content: updatedContent
-    });
-
-  } catch (error) {
-    console.error('Update content error:', error);
-    res.status(403).json({
-      success: false,
-      error: error.message || 'Failed to update content'
-    });
-  }
-});
-
-// Delete content (creator only)
-router.delete('/:contentId', authenticateToken, (req, res) => {
-  try {
-    const { contentId } = req.params;
-
-    contentService.deleteContent(contentId, req.user.address);
-
-    res.json({
-      success: true,
-      message: 'Content deleted successfully'
-    });
-
-  } catch (error) {
-    console.error('Delete content error:', error);
-    res.status(403).json({
-      success: false,
-      error: error.message || 'Failed to delete content'
-    });
-  }
-});
-
-// Check if user can access content
-router.get('/:contentId/access', authenticateToken, (req, res) => {
-  try {
-    const { contentId } = req.params;
-    const canAccess = contentService.canAccessContent(contentId, req.user.address);
-
-    res.json({
-      success: true,
-      contentId,
-      canAccess,
-      userTier: contentService.getUserTier(req.user.address)
-    });
-
-  } catch (error) {
-    console.error('Check access error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to check access'
-    });
-  }
-});
-
-// Get creator statistics
-router.get('/creator/:creatorAddress/stats', authenticateToken, (req, res) => {
-  try {
-    const { creatorAddress } = req.params;
-    const stats = contentService.getCreatorStats(creatorAddress, req.user.address);
-
-    res.json({
-      success: true,
-      creatorAddress,
-      stats
-    });
-
-  } catch (error) {
-    console.error('Get creator stats error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get creator statistics'
-    });
-  }
-});
-
-// Get upgrade suggestions for user
-router.get('/upgrade/suggestions', authenticateToken, (req, res) => {
-  try {
-    const suggestions = contentService.getUpgradeSuggestions(req.user.address);
-
-    res.json({
-      success: true,
-      suggestions
-    });
-
-  } catch (error) {
-    console.error('Get upgrade suggestions error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get upgrade suggestions'
-    });
-  }
-});
-
-// Get content by tier (for discovery)
-router.get('/tier/:tierName', authenticateToken, (req, res) => {
-  try {
-    const { tierName } = req.params;
-
-    // Validate tier name
-    const validTiers = ['bronze', 'silver', 'gold'];
-    if (!validTiers.includes(tierName)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid tier. Must be bronze, silver, or gold'
-      });
-    }
-
-    const filters = {
-      ...req.query,
-      requiredTier: tierName
-    };
-
-    const contentList = contentService.listContent(req.user.address, filters);
-
-    res.json({
-      success: true,
-      tier: tierName,
-      content: contentList,
-      count: contentList.length
-    });
-
-  } catch (error) {
-    console.error('Get content by tier error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get content by tier'
-    });
-  }
-});
-
-// Search content with tier awareness
-router.post('/search', authenticateToken, (req, res) => {
-  try {
-    const { query, filters = {} } = req.body;
-
-    if (!query) {
-      return res.status(400).json({
-        success: false,
-        error: 'Search query is required'
-      });
-    }
-
-    const searchFilters = {
-      ...filters,
-      search: query
-    };
-
-    const results = contentService.listContent(req.user.address, searchFilters);
-
-    res.json({
-      success: true,
-      query,
-      results,
-      count: results.length
-    });
-
-  } catch (error) {
-    console.error('Search content error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to search content'
-    });
-  }
-});
-
-// Get user's accessible content summary
-router.get('/user/summary', authenticateToken, (req, res) => {
-  try {
-    const userTier = contentService.getUserTier(req.user.address);
-    const allContent = contentService.listContent(req.user.address);
-
-    const summary = {
-      userTier,
-      totalContent: allContent.length,
-      accessibleContent: allContent.filter(c => !c.censored).length,
-      restrictedContent: allContent.filter(c => c.censored).length,
-      contentByTier: {
-        bronze: allContent.filter(c => c.requiredTier === 'bronze').length,
-        silver: allContent.filter(c => c.requiredTier === 'silver').length,
-        gold: allContent.filter(c => c.requiredTier === 'gold').length
-      }
-    };
-
-    res.json({
-      success: true,
-      summary
-    });
-
-  } catch (error) {
-    console.error('Get user summary error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get user summary'
-    });
+    return res.json({ success: true, ...content, locked: false });
+  } catch (err) {
+    console.error('[content] GET /:id error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch content' });
   }
 });
 

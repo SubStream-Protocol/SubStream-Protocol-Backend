@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 
 const { Networks } = require('@stellar/stellar-sdk');
 
@@ -117,6 +118,76 @@ function loadConfig(env = process.env) {
       port: Number(env.IPFS_PORT || 5001),
       protocol: env.IPFS_PROTOCOL || 'http',
     } : null,
+    ipIntelligence: {
+      enabled: env.IP_INTELLIGENCE_ENABLED === 'true',
+      providers: {
+        ipinfo: {
+          enabled: env.IPINFO_ENABLED === 'true',
+          apiKey: env.IPINFO_API_KEY || '',
+          timeout: Number(env.IPINFO_TIMEOUT || 5000)
+        },
+        maxmind: {
+          enabled: env.MAXMIND_ENABLED === 'true',
+          apiKey: env.MAXMIND_API_KEY || '',
+          timeout: Number(env.MAXMIND_TIMEOUT || 5000)
+        },
+        abuseipdb: {
+          enabled: env.ABUSEIPDB_ENABLED === 'true',
+          apiKey: env.ABUSEIPDB_API_KEY || '',
+          timeout: Number(env.ABUSEIPDB_TIMEOUT || 5000)
+        },
+        ipqualityscore: {
+          enabled: env.IPQUALITYSCORE_ENABLED === 'true',
+          apiKey: env.IPQUALITYSCORE_API_KEY || '',
+          timeout: Number(env.IPQUALITYSCORE_TIMEOUT || 5000)
+        }
+      },
+      riskThresholds: {
+        low: Number(env.IP_RISK_THRESHOLD_LOW || 30),
+        medium: Number(env.IP_RISK_THRESHOLD_MEDIUM || 60),
+        high: Number(env.IP_RISK_THRESHOLD_HIGH || 80),
+        critical: Number(env.IP_RISK_THRESHOLD_CRITICAL || 90)
+      },
+      cache: {
+        enabled: env.IP_CACHE_ENABLED !== 'false',
+        ttl: Number(env.IP_CACHE_TTL_MS || 3600000), // 1 hour
+        maxSize: Number(env.IP_CACHE_MAX_SIZE || 10000)
+      },
+      rateLimit: {
+        requestsPerMinute: Number(env.IP_RATE_LIMIT_PER_MINUTE || 100),
+        burstLimit: Number(env.IP_RATE_LIMIT_BURST || 20)
+      }
+    },
+    behavioralBiometric: {
+      enabled: env.BEHAVIORAL_BIOMETRIC_ENABLED === 'true',
+      collection: {
+        enabled: env.BEHAVIORAL_COLLECTION_ENABLED !== 'false',
+        sampleRate: Number(env.BEHAVIORAL_SAMPLE_RATE || 1.0),
+        maxEventsPerSession: Number(env.BEHAVIORAL_MAX_EVENTS_PER_SESSION || 1000),
+        sessionTimeout: Number(env.BEHAVIORAL_SESSION_TIMEOUT || 30 * 60 * 1000), // 30 minutes
+        anonymizeIP: env.BEHAVIORAL_ANONYMIZE_IP !== 'false',
+        hashSalt: env.BEHAVIORAL_HASH_SALT || crypto.randomBytes(32).toString('hex')
+      },
+      classifier: {
+        enabled: env.BEHAVIORAL_CLASSIFIER_ENABLED !== 'false',
+        modelType: env.BEHAVIORAL_MODEL_TYPE || 'rule_based',
+        confidenceThreshold: Number(env.BEHAVIORAL_CONFIDENCE_THRESHOLD || 0.7),
+        trainingThreshold: Number(env.BEHAVIORAL_TRAINING_THRESHOLD || 100),
+        retrainInterval: Number(env.BEHAVIORAL_RETRAIN_INTERVAL || 7 * 24 * 60 * 60 * 1000) // 7 days
+      },
+      thresholds: {
+        botScoreThreshold: Number(env.BEHAVIORAL_BOT_SCORE_THRESHOLD || 0.8),
+        throttlingThreshold: env.BEHAVIORAL_THROTTLING_THRESHOLD || 0.6,
+        watchListThreshold: env.BEHAVIORAL_WATCH_LIST_THRESHOLD || 0.9,
+        anomalyThreshold: env.BEHAVIORAL_ANOMALY_THRESHOLD || 0.75
+      },
+      privacy: {
+        dataRetentionDays: Number(env.BEHAVIORAL_DATA_RETENTION_DAYS || 30),
+        hashPersonalData: env.BEHAVIORAL_HASH_PERSONAL_DATA !== 'false',
+        excludePII: env.BEHAVIORAL_EXCLUDE_PII !== 'false',
+        gdprCompliant: env.BEHAVIORAL_GDPR_COMPLIANT !== 'false'
+      }
+    },
     rabbitmq: {
       url: env.RABBITMQ_URL || '',
       host: env.RABBITMQ_HOST || 'localhost',
@@ -129,6 +200,7 @@ function loadConfig(env = process.env) {
       notificationQueue: env.RABBITMQ_NOTIFICATION_QUEUE || 'substream_notifications_queue',
       emailQueue: env.RABBITMQ_EMAIL_QUEUE || 'substream_emails_queue',
       leaderboardQueue: env.RABBITMQ_LEADERBOARD_QUEUE || 'substream_leaderboard_queue',
+    }
     },
     substream: {
       baseDomain: env.SUBSTREAM_BASE_DOMAIN || 'substream.app',
@@ -151,9 +223,8 @@ function loadConfig(env = process.env) {
       useApi: env.CADDY_USE_API === 'true',
     },
   };
-}
 
-module.exports = {
-  DEFAULT_CONTRACT_ID,
-  loadConfig,
-};
+  module.exports = {
+    DEFAULT_CONTRACT_ID,
+    loadConfig,
+  };

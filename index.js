@@ -20,6 +20,12 @@ const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
 const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
+const { IPIntelligenceService } = require('./src/services/ipIntelligenceService');
+const { IPBlockingService } = require('./src/services/ipBlockingService');
+const { IPMonitoringService } = require('./src/services/ipMonitoringService');
+const { IPIntelligenceMiddleware } = require('./src/middleware/ipIntelligenceMiddleware');
+const { BehavioralBiometricService } = require('./src/services/behavioralBiometricService');
+const { BotDetectionClassifier } = require('./src/services/botDetectionClassifier');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
 const { GlobalStatsService } = require('./src/services/globalStatsService');
@@ -34,6 +40,7 @@ const createGlobalStatsRouter = require('./routes/globalStats');
 const createDeviceRoutes = require('./routes/device');
 const createSwaggerRoutes = require('./routes/swagger');
 const { createIPIntelligenceRoutes } = require('./routes/ipIntelligence');
+const { createBehavioralBiometricRoutes } = require('./routes/behavioralBiometric');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
@@ -189,20 +196,7 @@ function createApp(dependencies = {}) {
 
   // Add request tracing middleware for structured logging
   app.use(requestTracingMiddleware);
-
-  // Add IP intelligence middleware if enabled
-  if (ipMiddleware) {
-    // Apply IP intelligence checks to sensitive endpoints
-    app.use('/api/cdn', ipMiddleware.createGeneralMiddleware('cdn_access'));
-    app.use('/api/creator', ipMiddleware.createCreatorMiddleware());
-    app.use('/api/creator/videos', ipMiddleware.createContentMiddleware());
-    app.use('/api/payouts', ipMiddleware.createWithdrawalMiddleware());
-
-    // SIWS flow protection
-    app.use('/api/subscription', ipMiddleware.createSIWSMiddleware());
-
-    logger.info('IP Intelligence middleware applied to sensitive endpoints');
-  }
+  
 
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
@@ -475,6 +469,13 @@ function createApp(dependencies = {}) {
     }));
   }
 
+  // Behavioral biometric management routes
+  if (behavioralService) {
+    app.use('/api/behavioral', createBehavioralBiometricRoutes({
+      behavioralService
+    }));
+  }
+
   // Health check endpoint
   app.get('/health', async (req, res) => {
     const health = {
@@ -486,8 +487,8 @@ function createApp(dependencies = {}) {
         redis: 'Unknown',
         rabbitmq: 'Unknown',
         stellar: 'Unknown',
-        aml: 'Unknown',
-        ipIntelligence: 'Unknown'
+        ipIntelligence: 'Unknown',
+        behavioralBiometric: 'Unknown'
       },
     };
 
@@ -544,20 +545,6 @@ function createApp(dependencies = {}) {
       isDegraded = true;
     }
 
-    // Check AML Scanner
-    try {
-      if (amlScannerWorker) {
-        const stats = amlScannerWorker.getScanStats();
-        health.services.aml = stats.isRunning ? 'Running' : 'Stopped';
-        if (!stats.isRunning) isDegraded = true;
-      } else {
-        health.services.aml = 'Not Configured';
-      }
-    } catch (error) {
-      health.services.aml = 'Error';
-      isDegraded = true;
-    }
-
     // Check IP Intelligence
     try {
       if (ipIntelligenceService) {
@@ -568,6 +555,19 @@ function createApp(dependencies = {}) {
       }
     } catch (error) {
       health.services.ipIntelligence = 'Error';
+      isDegraded = true;
+    }
+
+    // Check Behavioral Biometric
+    try {
+      if (behavioralService) {
+        const stats = behavioralService.getServiceStats();
+        health.services.behavioralBiometric = 'Running';
+      } else {
+        health.services.behavioralBiometric = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.behavioralBiometric = 'Error';
       isDegraded = true;
     }
 

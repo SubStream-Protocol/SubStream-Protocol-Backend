@@ -20,9 +20,15 @@ const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
 const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
+const { IPIntelligenceService } = require('./src/services/ipIntelligenceService');
+const { IPBlockingService } = require('./src/services/ipBlockingService');
+const { IPMonitoringService } = require('./src/services/ipMonitoringService');
+const { IPIntelligenceMiddleware } = require('./src/middleware/ipIntelligenceMiddleware');
+const { BehavioralBiometricService } = require('./src/services/behavioralBiometricService');
+const { BotDetectionClassifier } = require('./src/services/botDetectionClassifier');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
-const GlobalStatsService = require('./src/services/globalStatsService');
+const { GlobalStatsService } = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
 const SocialTokenGatingService = require('./services/socialTokenGatingService');
 const SocialTokenGatingMiddleware = require('./middleware/socialTokenGating');
@@ -80,16 +86,45 @@ function createApp(dependencies = {}) {
   // Initialize background worker service for async processing
   const backgroundWorker = dependencies.backgroundWorker || new BackgroundWorkerService(config.rabbitmq);
 
+  // Initialize federation service for ActivityPub integration
+  const federationService = dependencies.federationService || new FederationService(config, database, backgroundWorker);
+
+  // Initialize federation worker for background processing
+  const federationWorker = dependencies.federationWorker || new FederationWorker(config, database, federationService);
+
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
   app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
   app.set('backgroundWorker', backgroundWorker);
+  app.set('federationService', federationService);
+  app.set('federationWorker', federationWorker);
 
-  // Start background worker if RabbitMQ is configured
-  if (config.rabbitmq && (config.rabbitmq.url || config.rabbitmq.host)) {
-    backgroundWorker.start().catch(error => {
-      console.error('Failed to start background worker:', error);
+  // Initialize and start AML scanner if enabled
+  let amlScannerWorker = null;
+  if (config.aml && config.aml.enabled) {
+    amlScannerWorker = dependencies.amlScannerWorker || new AMLScannerWorker(database, config.aml);
+    app.set('amlScannerWorker', amlScannerWorker);
+
+    amlScannerWorker.start().catch(error => {
+      console.error('Failed to start AML scanner worker:', error);
     });
+
+  // Start federation worker if ActivityPub is enabled
+  if (config.activityPub?.enabled !== false) {
+    const federationWorker = dependencies.federationWorker || new FederationWorker(database, config);
+    federationWorker.start().catch(error => {
+      console.error('Failed to start federation worker:', error);
+    });
+  }
+
+  // Start leaderboard worker if enabled
+  if (config.leaderboard?.enabled !== false) {
+    const leaderboardWorker = dependencies.leaderboardWorker || new LeaderboardWorker(config, database, getRedisClient(), EngagementLeaderboardService);
+    leaderboardWorker.start().catch(error => {
+      console.error('Failed to start leaderboard worker:', error);
+    });
+
+    console.log('IP Intelligence services initialized');
   }
 
   const dayInMs = 24 * 60 * 60 * 1000;
@@ -129,6 +164,11 @@ function createApp(dependencies = {}) {
     initialDelay: process.env.GLOBAL_STATS_INITIAL_DELAY ? parseInt(process.env.GLOBAL_STATS_INITIAL_DELAY) : 5000
   });
 
+  // Initialize leaderboard service and worker
+  const redisClient = getRedisClient();
+  const leaderboardService = dependencies.leaderboardService || new EngagementLeaderboardService(config, database, redisClient);
+  const leaderboardWorker = dependencies.leaderboardWorker || new LeaderboardWorker(config, database, redisClient, leaderboardService);
+
   // Initialize subdomain and SSL services
   const subdomainService = dependencies.subdomainService || new SubdomainService(database, config);
   const sslCertificateService = dependencies.sslCertificateService || new SslCertificateService(config);
@@ -161,6 +201,13 @@ function createApp(dependencies = {}) {
   globalStatsWorker.start().catch(error => {
     console.error('Failed to start global stats worker:', error);
   });
+
+  // Start federation worker if ActivityPub is enabled
+  if (config.activityPub?.enabled !== false) {
+    federationWorker.start().catch(error => {
+      console.error('Failed to start federation worker:', error);
+    });
+  }
 
   app.use(cors());
   app.use(express.json());
@@ -479,6 +526,22 @@ function createApp(dependencies = {}) {
   // API Documentation with Swagger UI
   app.use('/api/docs', createSwaggerRoutes);
 
+  // IP Intelligence management routes
+  if (ipIntelligenceService) {
+    app.use('/api/ip-intelligence', createIPIntelligenceRoutes({
+      ipIntelligenceService,
+      ipBlockingService,
+      ipMonitoringService
+    }));
+  }
+
+  // Behavioral biometric management routes
+  if (behavioralService) {
+    app.use('/api/behavioral', createBehavioralBiometricRoutes({
+      behavioralService
+    }));
+  }
+
   // Health check endpoint
   app.get('/health', async (req, res) => {
     const health = {
@@ -490,6 +553,8 @@ function createApp(dependencies = {}) {
         redis: 'Unknown',
         rabbitmq: 'Unknown',
         stellar: 'Unknown',
+        ipIntelligence: 'Unknown',
+        behavioralBiometric: 'Unknown'
       },
     };
 
@@ -543,6 +608,32 @@ function createApp(dependencies = {}) {
       }
     } catch (error) {
       health.services.stellar = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check IP Intelligence
+    try {
+      if (ipIntelligenceService) {
+        const stats = ipIntelligenceService.getServiceStats();
+        health.services.ipIntelligence = 'Running';
+      } else {
+        health.services.ipIntelligence = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.ipIntelligence = 'Error';
+      isDegraded = true;
+    }
+
+    // Check Behavioral Biometric
+    try {
+      if (behavioralService) {
+        const stats = behavioralService.getServiceStats();
+        health.services.behavioralBiometric = 'Running';
+      } else {
+        health.services.behavioralBiometric = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.behavioralBiometric = 'Error';
       isDegraded = true;
     }
 

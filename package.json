@@ -22,7 +22,7 @@
   "dependencies": {
     "@sentry/node": "^10.46.0",
     "@stellar/stellar-sdk": "^14.6.1",
-    "amqplib": "^0.10.3",
+    "amqplib": "^1.0.2",
     "aws-sdk": "^2.1500.0",
     "axios": "^1.14.0",
     "better-sqlite3": "^12.8.0",

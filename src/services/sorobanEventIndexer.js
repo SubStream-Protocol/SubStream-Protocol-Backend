@@ -1,6 +1,7 @@
 const { SorobanRpcService } = require('./sorobanRpcService');
 const { SorobanXdrParser } = require('../utils/sorobanXdrParser');
 const { SorobanDeadLetterQueue } = require('./sorobanDeadLetterQueue');
+const { PriceCacheService } = require('./priceCacheService');
 const { AppDatabase } = require('../db/appDatabase');
 
 /**
@@ -23,6 +24,12 @@ class SorobanEventIndexer {
       logger: this.logger,
       database: this.database,
       alertService: dependencies.alertService || null
+    });
+    
+    // Price cache integration
+    this.priceCacheService = dependencies.priceCacheService || new PriceCacheService(config, {
+      logger: this.logger,
+      database: this.database
     });
     
     // Pub/Sub integration
@@ -48,6 +55,9 @@ class SorobanEventIndexer {
       dlqItemsAdded: 0,
       dlqItemsRetried: 0,
       dlqItemsResolved: 0,
+      billingEventsCreated: 0,
+      usdConversionsSuccessful: 0,
+      usdConversionsFailed: 0,
       ledgersProcessed: 0,
       startTime: null,
       lastEventTime: null
@@ -69,6 +79,9 @@ class SorobanEventIndexer {
       
       // Initialize DLQ service
       await this.dlqService.initialize();
+      
+      // Initialize price cache service
+      await this.priceCacheService.initialize();
       
       // Start the main indexing loop
       this.isRunning = true;
@@ -251,6 +264,18 @@ class SorobanEventIndexer {
       // Store the event in database
       const eventId = await this.storeEvent(parsedEvent);
       
+      // Create billing event with USD equivalent for subscription events
+      let billingEventId = null;
+      try {
+        billingEventId = await this.createBillingEvent(parsedEvent, eventId);
+      } catch (billingError) {
+        this.logger.error('Failed to create billing event', {
+          eventId,
+          error: billingError.message
+        });
+        // Don't fail the entire event processing for billing event creation
+      }
+      
       // Publish to internal Pub/Sub if configured
       if (this.eventPublisher) {
         await this.publishEvent(parsedEvent, eventId);
@@ -416,6 +441,104 @@ class SorobanEventIndexer {
       this.logger.error('Failed to store event', {
         transactionHash: parsedEvent.transactionHash,
         eventIndex: parsedEvent.eventIndex,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Create billing event with USD equivalent
+   */
+  async createBillingEvent(parsedEvent, eventId) {
+    // Only create billing events for subscription-related events
+    if (!['SubscriptionBilled', 'PaymentFailed'].includes(parsedEvent.type)) {
+      return null;
+    }
+
+    try {
+      const eventData = parsedEvent.parsedData;
+      
+      // Extract payment information
+      const assetCode = eventData.currency || 'XLM';
+      const assetIssuer = eventData.assetIssuer || null;
+      const amount = parseFloat(eventData.amount) || 0;
+      
+      if (amount <= 0) {
+        this.logger.warn('Invalid amount for billing event', {
+          eventId,
+          amount,
+          assetCode
+        });
+        return null;
+      }
+
+      // Get USD equivalent using price cache
+      const usdData = await this.priceCacheService.getUsdEquivalent(
+        assetCode,
+        assetIssuer,
+        amount,
+        parsedEvent.ledgerTimestamp
+      );
+
+      // Create billing event record
+      const billingEventId = this.generateBillingEventId();
+      
+      const stmt = this.database.db.prepare(`
+        INSERT INTO billing_events (
+          id, contract_id, transaction_hash, event_index, ledger_sequence,
+          subscriber_address, creator_address, subscription_id, billing_period,
+          asset_code, asset_issuer, amount,
+          usd_equivalent, usd_price_timestamp, usd_price_confidence,
+          event_type, event_timestamp, raw_event_data,
+          backfill_required, processing_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        billingEventId,
+        parsedEvent.contractId,
+        parsedEvent.transactionHash,
+        parsedEvent.eventIndex,
+        parsedEvent.ledgerSequence,
+        eventData.subscriberAddress || eventData.subscriber_address,
+        eventData.creatorAddress || eventData.creatorAddress,
+        eventData.subscriptionId || `sub_${Date.now()}`,
+        eventData.billingPeriod || 'monthly',
+        assetCode,
+        assetIssuer,
+        amount,
+        usdData.usdEquivalent,
+        usdData.priceTimestamp,
+        usdData.confidence,
+        parsedEvent.type,
+        parsedEvent.ledgerTimestamp,
+        JSON.stringify(eventData),
+        usdData.backfillRequired,
+        usdData.backfillRequired ? 'pending' : 'completed'
+      );
+
+      // Update statistics
+      this.stats.billingEventsCreated++;
+      if (usdData.usdEquivalent) {
+        this.stats.usdConversionsSuccessful++;
+      } else {
+        this.stats.usdConversionsFailed++;
+      }
+
+      this.logger.info('Billing event created', {
+        billingEventId,
+        eventId,
+        assetCode,
+        amount,
+        usdEquivalent: usdData.usdEquivalent,
+        backfillRequired: usdData.backfillRequired
+      });
+
+      return billingEventId;
+    } catch (error) {
+      this.logger.error('Failed to create billing event', {
+        eventId,
         error: error.message
       });
       throw error;
@@ -598,10 +721,48 @@ class SorobanEventIndexer {
   }
 
   /**
+   * Generate unique billing event ID
+   */
+  generateBillingEventId() {
+    return `billing_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
    * Sleep utility
    */
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Close the indexer and all services
+   */
+  async close() {
+    try {
+      this.logger.info('Closing Soroban Event Indexer...');
+      
+      // Stop processing
+      this.isRunning = false;
+      
+      // Close services
+      if (this.dlqService) {
+        await this.dlqService.close();
+      }
+      
+      if (this.priceCacheService) {
+        await this.priceCacheService.close();
+      }
+      
+      if (this.rpcService) {
+        await this.rpcService.close();
+      }
+      
+      this.logger.info('Soroban Event Indexer closed');
+    } catch (error) {
+      this.logger.error('Error closing indexer', {
+        error: error.message
+      });
+    }
   }
 }
 

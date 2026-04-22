@@ -829,6 +829,7 @@ app.use("/auth", require("./routes/auth"));
 app.use("/auth", require("./routes/stellarAuth"));
 app.use("/api/v1/merchants", require("./routes/merchants"));
 app.use("/api/v1/pre-billing", require("./routes/preBilling"));
+app.use("/api/v1/notifications", require("./routes/notifications"));
 app.use("/content", require("./routes/content"));
 app.use("/analytics", require("./routes/analytics"));
 app.use("/storage", require("./routes/storage"));

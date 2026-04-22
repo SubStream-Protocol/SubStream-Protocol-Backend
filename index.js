@@ -1,8 +1,17 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+
+dotenv.config();
 require('dotenv').config();
 dotenv.config();
+
+// Initialize structured logging and error tracking
+const { logger, requestTracingMiddleware } = require('./src/utils/logger');
+const { errorTracking } = require('./src/utils/errorTracking');
+
+// Initialize error tracking
+errorTracking.initialize();
 
 const { AppDatabase } = require('./src/db/appDatabase');
 const { loadConfig } = require('./src/config');
@@ -13,17 +22,32 @@ const { CreatorAuthService } = require('./src/services/creatorAuthService');
 const { SorobanSubscriptionVerifier } = require('./src/services/sorobanSubscriptionVerifier');
 const { SubscriptionService } = require('./src/services/subscriptionService');
 const { SubscriptionExpiryChecker } = require('./src/services/subscriptionExpiryChecker');
+const { IPIntelligenceService } = require('./src/services/ipIntelligenceService');
+const { IPBlockingService } = require('./src/services/ipBlockingService');
+const { IPMonitoringService } = require('./src/services/ipMonitoringService');
+const { IPIntelligenceMiddleware } = require('./src/middleware/ipIntelligenceMiddleware');
+const { BehavioralBiometricService } = require('./src/services/behavioralBiometricService');
+const { BotDetectionClassifier } = require('./src/services/botDetectionClassifier');
 const VideoProcessingWorker = require('./src/services/videoProcessingWorker');
 const { BackgroundWorkerService } = require('./src/services/backgroundWorkerService');
-const GlobalStatsService = require('./src/services/globalStatsService');
+const { GlobalStatsService } = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
+const CollaborationRevenueService = require('./services/collaborationRevenueService');
+const CollaborationWatchTimeMiddleware = require('./middleware/collaborationWatchTime');
 const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
+const createDeviceRoutes = require('./routes/device');
+const createSwaggerRoutes = require('./routes/swagger');
+const createCollaborationRoutes = require('./routes/collaborations');
 const { buildAuditLogCsv } = require('./src/utils/export/auditLogCsv');
 const { buildAuditLogPdf } = require('./src/utils/export/auditLogPdf');
 const { getRequestIp } = require('./src/utils/requestIp');
 const { getRedisClient, closeRedisClient } = require('./src/config/redis');
 const { createRateLimiter } = require('./middleware/rateLimiter');
+
+
+// Tier middleware — attaches req.user.tier to every request
+const { attachTier } = require('./middleware/tierAuth');
 
 /**
  * Create the Express application with injectable services for testing.
@@ -35,15 +59,27 @@ function createApp(dependencies = {}) {
   const app = express();
   const config = dependencies.config || loadConfig();
   const database = dependencies.database || new AppDatabase(config.database.filename);
+  const auditLogService =
+    dependencies.auditLogService || new CreatorAuditLogService(database);
 
   const auditLogService = dependencies.auditLogService || new CreatorAuditLogService(database);
   const creatorActionService =
-    dependencies.creatorActionService || new CreatorActionService(database, auditLogService);
-  const creatorAuthService = dependencies.creatorAuthService || new CreatorAuthService(config);
+    dependencies.creatorActionService ||
+    new CreatorActionService(database, auditLogService);
+  const creatorAuthService =
+    dependencies.creatorAuthService || new CreatorAuthService(config);
   const subscriptionVerifier =
     dependencies.subscriptionVerifier || new SorobanSubscriptionVerifier(config);
   const tokenService = dependencies.tokenService || new CdnTokenService(config);
 
+  // ── Global middleware ──────────────────────────────────────────────────────
+  app.use(cors());
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // Attach req.user = { address, tier } to every request.
+  // Never rejects — unauthenticated requests get tier = 'guest'.
+  app.use(attachTier);
   // Notification and email utilities
   const { NotificationService } = require('./src/services/notificationService');
   const { sendEmail } = require('./src/utils/email');
@@ -56,7 +92,7 @@ function createApp(dependencies = {}) {
       notificationService,
       emailUtil: { sendEmail },
     });
-    dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
+  dependencies.subscriptionService || new SubscriptionService({ database, auditLogService, config });
   const subscriptionExpiryChecker =
     dependencies.subscriptionExpiryChecker ||
     new SubscriptionExpiryChecker({
@@ -67,16 +103,45 @@ function createApp(dependencies = {}) {
   // Initialize background worker service for async processing
   const backgroundWorker = dependencies.backgroundWorker || new BackgroundWorkerService(config.rabbitmq);
 
+  // Initialize federation service for ActivityPub integration
+  const federationService = dependencies.federationService || new FederationService(config, database, backgroundWorker);
+
+  // Initialize federation worker for background processing
+  const federationWorker = dependencies.federationWorker || new FederationWorker(config, database, federationService);
+
   // expose the service on the express app so external routers can access it
   app.set('subscriptionService', subscriptionService);
   app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
   app.set('backgroundWorker', backgroundWorker);
+  app.set('federationService', federationService);
+  app.set('federationWorker', federationWorker);
 
-  // Start background worker if RabbitMQ is configured
-  if (config.rabbitmq && (config.rabbitmq.url || config.rabbitmq.host)) {
-    backgroundWorker.start().catch(error => {
-      console.error('Failed to start background worker:', error);
+  // Initialize and start AML scanner if enabled
+  let amlScannerWorker = null;
+  if (config.aml && config.aml.enabled) {
+    amlScannerWorker = dependencies.amlScannerWorker || new AMLScannerWorker(database, config.aml);
+    app.set('amlScannerWorker', amlScannerWorker);
+
+    amlScannerWorker.start().catch(error => {
+      console.error('Failed to start AML scanner worker:', error);
     });
+
+  // Start federation worker if ActivityPub is enabled
+  if (config.activityPub?.enabled !== false) {
+    const federationWorker = dependencies.federationWorker || new FederationWorker(database, config);
+    federationWorker.start().catch(error => {
+      console.error('Failed to start federation worker:', error);
+    });
+  }
+
+  // Start leaderboard worker if enabled
+  if (config.leaderboard?.enabled !== false) {
+    const leaderboardWorker = dependencies.leaderboardWorker || new LeaderboardWorker(config, database, getRedisClient(), EngagementLeaderboardService);
+    leaderboardWorker.start().catch(error => {
+      console.error('Failed to start leaderboard worker:', error);
+    });
+
+    console.log('IP Intelligence services initialized');
   }
 
   const dayInMs = 24 * 60 * 60 * 1000;
@@ -100,6 +165,14 @@ function createApp(dependencies = {}) {
 
   const videoWorker = dependencies.videoWorker || new VideoProcessingWorker(config, database);
 
+  // Initialize social token gating service and middleware
+  const socialTokenService = dependencies.socialTokenService || new SocialTokenGatingService(config, database, getRedisClient());
+  const socialTokenMiddleware = dependencies.socialTokenMiddleware || new SocialTokenGatingMiddleware(socialTokenService, database, getRedisClient());
+
+  // Initialize collaboration revenue service and watch time middleware
+  const collaborationService = dependencies.collaborationService || new CollaborationRevenueService(config, database, getRedisClient());
+  const collaborationWatchTimeMiddleware = dependencies.collaborationWatchTimeMiddleware || new CollaborationWatchTimeMiddleware(collaborationService, database);
+
   // Initialize global stats service and worker
   const globalStatsService = dependencies.globalStatsService || new GlobalStatsService(database);
   const globalStatsWorker = dependencies.globalStatsWorker || new GlobalStatsWorker(database, {
@@ -107,27 +180,80 @@ function createApp(dependencies = {}) {
     initialDelay: process.env.GLOBAL_STATS_INITIAL_DELAY ? parseInt(process.env.GLOBAL_STATS_INITIAL_DELAY) : 5000
   });
 
+  // Initialize leaderboard service and worker
+  const redisClient = getRedisClient();
+  const leaderboardService = dependencies.leaderboardService || new EngagementLeaderboardService(config, database, redisClient);
+  const leaderboardWorker = dependencies.leaderboardWorker || new LeaderboardWorker(config, database, redisClient, leaderboardService);
+
+  // Initialize subdomain and SSL services
+  const subdomainService = dependencies.subdomainService || new SubdomainService(database, config);
+  const sslCertificateService = dependencies.sslCertificateService || new SslCertificateService(config);
+  const subdomainMiddleware = dependencies.subdomainMiddleware || new SubdomainMiddleware(database, config);
+
   // expose services on the express app so external routers can access them
   app.set('subscriptionService', subscriptionService);
   app.set('subscriptionExpiryChecker', subscriptionExpiryChecker);
   app.set('backgroundWorker', backgroundWorker);
   app.set('globalStatsService', globalStatsService);
   app.set('globalStatsWorker', globalStatsWorker);
+  app.set('leaderboardService', leaderboardService);
+  app.set('leaderboardWorker', leaderboardWorker);
+  app.set('socialTokenService', socialTokenService);
+  app.set('socialTokenMiddleware', socialTokenMiddleware);
+  app.set('subdomainService', subdomainService);
+  app.set('sslCertificateService', sslCertificateService);
+  app.set('collaborationService', collaborationService);
+  app.set('collaborationWatchTimeMiddleware', collaborationWatchTimeMiddleware);
+
+  // Initialize and start predictive churn analysis worker
+  const { PredictiveChurnAnalysisWorker } = require('./src/services/predictiveChurnAnalysisWorker');
+  const churnAnalysisWorker = dependencies.churnAnalysisWorker || new PredictiveChurnAnalysisWorker(database, {
+    checkInterval: process.env.CHURN_ANALYSIS_INTERVAL ? parseInt(process.env.CHURN_ANALYSIS_INTERVAL) : 3600000,
+  });
+  app.set('churnAnalysisWorker', churnAnalysisWorker);
+  churnAnalysisWorker.start().catch(error => {
+    console.error('Failed to start PredictiveChurnAnalysisWorker:', error);
+  });
 
   // Start global stats worker
   globalStatsWorker.start().catch(error => {
     console.error('Failed to start global stats worker:', error);
   });
 
+  // Start federation worker if ActivityPub is enabled
+  if (config.activityPub?.enabled !== false) {
+    federationWorker.start().catch(error => {
+      console.error('Failed to start federation worker:', error);
+    });
+  }
+
   app.use(cors());
   app.use(express.json());
+
+
   // Subscription events webhook
   app.use('/api/subscription', require('./routes/subscription'));
   // Payouts API
   app.use('/api/payouts', require('./routes/payouts'));
-  
+
+  // Social token gating endpoints
+  app.use('/api/social-token', createSocialTokenRoutes());
+
   // Global stats endpoints
   app.use('/api/global-stats', createGlobalStatsRouter({ database, globalStatsService }));
+
+  // Creator collaboration endpoints
+  app.use('/api/collaborations', createCollaborationRoutes());
+
+  // Subdomain management endpoints
+  app.use('/api/subdomains', createSubdomainRoutes({ database, config, subdomainService, sslCertificateService }));
+
+  // Price feed endpoints
+  const createPriceRouter = require('./routes/price');
+  app.use('/api/price-feed', createPriceRouter());
+
+  // Social token gating endpoints
+  app.use('/api/social-token', createSocialTokenRoutes());
 
   app.use((req, res, next) => {
     req.config = config;
@@ -149,23 +275,60 @@ function createApp(dependencies = {}) {
     }));
   }
 
+  // ── Health / root ──────────────────────────────────────────────────────────
   app.get('/', (req, res) => {
     res.json({
       project: 'SubStream Protocol',
       status: 'Active',
       contract: config.soroban.contractId,
+      version: '1.0.0',
+      endpoints: {
+        auth: '/auth',
+        content: '/content',
+        analytics: '/analytics',
+        storage: '/storage',
+        posts: '/posts',
+        health: '/health',
+      },
     });
   });
 
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      services: {
+        auth: 'active',
+        content: 'active',
+        analytics: 'active',
+        storage: 'active',
+        posts: 'active',
+      },
+    });
+  });
+
+  // ── Auth routes ────────────────────────────────────────────────────────────
+  app.use('/auth', require('./routes/auth'));
+  app.use('/auth', require('./routes/stellarAuth'));
+
+  // ── Tier-gated content routes ──────────────────────────────────────────────
+  // attachTier already ran globally; routes/content.js uses requireTier
+  // on individual endpoints as needed.
+  app.use('/content', require('./routes/content'));
+
+  // ── Other feature routes ───────────────────────────────────────────────────
+  app.use('/analytics', require('./routes/analytics'));
+  app.use('/storage', require('./routes/storage'));
+  app.use('/posts', require('./routes/posts'));
+
+  // ── CDN token endpoints ────────────────────────────────────────────────────
   app.post('/api/cdn/token', async (req, res) => {
     const requiredFields = ['walletAddress', 'creatorAddress', 'contentId', 'segmentPath'];
     const missingFields = requiredFields.filter((field) => !req.body?.[field]);
 
     if (missingFields.length > 0) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        missingFields,
-      });
+      return res.status(400).json({ error: 'Missing required fields', missingFields });
     }
 
     try {
@@ -176,6 +339,32 @@ function createApp(dependencies = {}) {
         segmentPath: req.body.segmentPath,
       };
 
+      // Check if content requires social token gating
+      const socialTokenService = req.app.get('socialTokenService');
+      let socialTokenAccess = null;
+
+      if (socialTokenService) {
+        socialTokenAccess = await socialTokenService.checkContentAccess(
+          accessRequest.walletAddress,
+          accessRequest.contentId
+        );
+
+        // If social token gating is required and access is denied, return error
+        if (socialTokenAccess.requiresToken && !socialTokenAccess.hasAccess) {
+          return res.status(403).json({
+            error: 'Social token requirements not met',
+            code: 'INSUFFICIENT_SOCIAL_TOKENS',
+            details: {
+              assetCode: socialTokenAccess.assetCode,
+              assetIssuer: socialTokenAccess.assetIssuer,
+              minimumBalance: socialTokenAccess.minimumBalance,
+              reason: socialTokenAccess.reason
+            }
+          });
+        }
+      }
+
+      // Verify subscription (existing logic)
       const subscription = await subscriptionVerifier.verifySubscription(accessRequest);
 
       if (!subscription.active) {
@@ -186,13 +375,34 @@ function createApp(dependencies = {}) {
         });
       }
 
-      const issuedToken = tokenService.issueToken({
+      // Issue token with social token metadata if applicable
+      const tokenData = {
         walletAddress: accessRequest.walletAddress,
         creatorAddress: accessRequest.creatorAddress,
         contentId: accessRequest.contentId,
         segmentPath: accessRequest.segmentPath,
         subscription,
-      });
+      };
+
+      // Add social token session info if required
+      if (socialTokenAccess && socialTokenAccess.requiresToken && socialTokenAccess.hasAccess) {
+        const sessionData = await socialTokenService.startBalanceReverification(
+          null, // Will generate session ID
+          accessRequest.walletAddress,
+          accessRequest.contentId
+        );
+        tokenData.socialTokenSession = {
+          sessionId: sessionData.sessionId,
+          verificationInterval: socialTokenAccess.verificationInterval,
+          assetInfo: {
+            code: socialTokenAccess.assetCode,
+            issuer: socialTokenAccess.assetIssuer,
+            minimumBalance: socialTokenAccess.minimumBalance
+          }
+        };
+      }
+
+      const issuedToken = tokenService.issueToken(tokenData);
 
       return res.status(200).json({
         token: issuedToken.token,
@@ -204,6 +414,7 @@ function createApp(dependencies = {}) {
           segmentPath: accessRequest.segmentPath,
           token: issuedToken.token,
         }),
+        socialTokenSession: tokenData.socialTokenSession || null
       });
     } catch (error) {
       return res.status(error.statusCode || 503).json({
@@ -244,24 +455,27 @@ function createApp(dependencies = {}) {
     }
   });
 
-  app.patch('/api/creator/flow-rate', requireCreatorAuth(creatorAuthService), async (req, res) => {
-    if (!isPresent(req.body?.flowRate)) {
-      return res.status(400).json({ success: false, error: 'flowRate is required' });
-    }
-
-    try {
-      const result = creatorActionService.updateFlowRate({
-        creatorId: req.creator.id,
-        flowRate: normalizeScalar(req.body.flowRate),
-        currency: isPresent(req.body.currency) ? String(req.body.currency) : null,
-        ipAddress: getRequestIp(req),
-      });
-
-      return res.status(200).json({ success: true, data: result });
-    } catch (error) {
-      return handleActionError(res, error);
-    }
-  });
+  // ── Creator action endpoints ───────────────────────────────────────────────
+  app.patch(
+    '/api/creator/flow-rate',
+    requireCreatorAuth(creatorAuthService),
+    async (req, res) => {
+      if (!isPresent(req.body?.flowRate)) {
+        return res.status(400).json({ success: false, error: 'flowRate is required' });
+      }
+      try {
+        const result = creatorActionService.updateFlowRate({
+          creatorId: req.creator.id,
+          flowRate: normalizeScalar(req.body.flowRate),
+          currency: isPresent(req.body.currency) ? String(req.body.currency) : null,
+          ipAddress: getRequestIp(req),
+        });
+        return res.status(200).json({ success: true, data: result });
+      } catch (error) {
+        return handleActionError(res, error);
+      }
+    },
+  );
 
   app.patch(
     '/api/creator/videos/:videoId/visibility',
@@ -270,7 +484,6 @@ function createApp(dependencies = {}) {
       if (!isPresent(req.body?.visibility)) {
         return res.status(400).json({ success: false, error: 'visibility is required' });
       }
-
       try {
         const result = creatorActionService.updateVideoVisibility({
           creatorId: req.creator.id,
@@ -278,7 +491,6 @@ function createApp(dependencies = {}) {
           visibility: String(req.body.visibility),
           ipAddress: getRequestIp(req),
         });
-
         return res.status(200).json({ success: true, data: result });
       } catch (error) {
         return handleActionError(res, error);
@@ -295,7 +507,6 @@ function createApp(dependencies = {}) {
           .status(400)
           .json({ success: false, error: 'splits must be a non-empty array' });
       }
-
       try {
         const result = creatorActionService.updateCoopSplit({
           creatorId: req.creator.id,
@@ -303,7 +514,6 @@ function createApp(dependencies = {}) {
           splits: req.body.splits,
           ipAddress: getRequestIp(req),
         });
-
         return res.status(200).json({ success: true, data: result });
       } catch (error) {
         return handleActionError(res, error);
@@ -311,11 +521,20 @@ function createApp(dependencies = {}) {
     },
   );
 
-  app.get('/api/creator/audit-log', requireCreatorAuth(creatorAuthService), (req, res) => {
-    const logs = auditLogService.listByCreatorId(req.creator.id);
-    return res.status(200).json({ success: true, data: logs });
-  });
+  app.get(
+    '/api/creator/audit-log',
+    requireCreatorAuth(creatorAuthService),
+    (req, res) => {
+      const logs = auditLogService.listByCreatorId(req.creator.id);
+      return res.status(200).json({ success: true, data: logs });
+    },
+  );
 
+  app.get(
+    '/api/creator/audit-log/export',
+    requireCreatorAuth(creatorAuthService),
+    (req, res) => {
+      const format = String(req.query.format || '').toLowerCase();
   // Get creator stats (including cached subscriber count)
   app.get('/api/creator/:id/stats', (req, res) => {
     try {
@@ -331,76 +550,218 @@ function createApp(dependencies = {}) {
   app.get('/api/creator/audit-log/export', requireCreatorAuth(creatorAuthService), (req, res) => {
     const format = String(req.query.format || '').toLowerCase();
 
-    if (!['csv', 'pdf'].includes(format)) {
-      return res.status(400).json({
-        success: false,
-        error: 'format must be one of: csv, pdf',
+      if (!['csv', 'pdf'].includes(format)) {
+        return res.status(400).json({ success: false, error: 'format must be one of: csv, pdf' });
+      }
+
+      const logs = auditLogService.listByCreatorId(req.creator.id);
+      const exportTimestamp = new Date().toISOString();
+
+      if (format === 'csv') {
+        const csv = buildAuditLogCsv(logs);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="creator-audit-log-${req.creator.id}.csv"`,
+        );
+        return res.status(200).send(csv);
+      }
+
+      const pdf = buildAuditLogPdf({
+        creatorId: req.creator.id,
+        exportedAt: exportTimestamp,
+        logs,
       });
-    }
-
-    const logs = auditLogService.listByCreatorId(req.creator.id);
-    const exportTimestamp = new Date().toISOString();
-
-    if (format === 'csv') {
-      const csv = buildAuditLogCsv(logs);
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Type', 'application/pdf');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="creator-audit-log-${req.creator.id}.csv"`,
+        `attachment; filename="creator-audit-log-${req.creator.id}.pdf"`,
       );
-      return res.status(200).send(csv);
-    }
+      return res.status(200).send(pdf);
+    },
+  );
 
-    const pdf = buildAuditLogPdf({
-      creatorId: req.creator.id,
-      exportedAt: exportTimestamp,
-      logs,
-    });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="creator-audit-log-${req.creator.id}.pdf"`,
-    );
-    return res.status(200).send(pdf);
+  // ── Error handlers ─────────────────────────────────────────────────────────
+  app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   });
 
+  app.use((req, res) => {
+    res.status(404).json({ success: false, error: 'Endpoint not found' });
   app.use('/api/videos', createVideoRoutes(config, database, videoWorker));
 
+  // Device fingerprinting endpoints for fraud prevention
+  if (process.env.REDIS_URL || process.env.REDIS_HOST) {
+    const deviceService = new DeviceFingerprintService(getRedisClient());
+    app.set('deviceFingerprintService', deviceService);
+    app.use('/api/device', createDeviceRoutes);
+  }
+
+  // API Documentation with Swagger UI
+  app.use('/api/docs', createSwaggerRoutes);
+
+  // IP Intelligence management routes
+  if (ipIntelligenceService) {
+    app.use('/api/ip-intelligence', createIPIntelligenceRoutes({
+      ipIntelligenceService,
+      ipBlockingService,
+      ipMonitoringService
+    }));
+  }
+
+  // Behavioral biometric management routes
+  if (behavioralService) {
+    app.use('/api/behavioral', createBehavioralBiometricRoutes({
+      behavioralService
+    }));
+  }
+
+  // Health check endpoint
+  app.get('/health', async (req, res) => {
+    const health = {
+      status: 'Healthy',
+      timestamp: new Date().toISOString(),
+      version: '1.0.0',
+      services: {
+        database: 'Unknown',
+        redis: 'Unknown',
+        rabbitmq: 'Unknown',
+        stellar: 'Unknown',
+        ipIntelligence: 'Unknown',
+        behavioralBiometric: 'Unknown'
+      },
+    };
+
+    let isDegraded = false;
+
+    // Check Database
+    try {
+      database.db.prepare('SELECT 1').get();
+      health.services.database = 'Connected';
+    } catch (error) {
+      health.services.database = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check Redis
+    try {
+      if (process.env.REDIS_URL || process.env.REDIS_HOST) {
+        const redisClient = getRedisClient();
+        const ping = await redisClient.ping();
+        health.services.redis = ping === 'PONG' ? 'Connected' : 'Offline';
+        if (ping !== 'PONG') isDegraded = true;
+      } else {
+        health.services.redis = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.redis = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check RabbitMQ
+    try {
+      if (backgroundWorker && backgroundWorker.rabbitmq) {
+        const status = backgroundWorker.getStatus();
+        health.services.rabbitmq = status.connected ? 'Connected' : 'Offline';
+        if (!status.connected) isDegraded = true;
+      } else {
+        health.services.rabbitmq = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.rabbitmq = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check Stellar/Soroban
+    try {
+      if (subscriptionVerifier && subscriptionVerifier.server) {
+        await subscriptionVerifier.server.getLatestLedger();
+        health.services.stellar = 'Connected';
+      } else {
+        health.services.stellar = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.stellar = 'Offline';
+      isDegraded = true;
+    }
+
+    // Check IP Intelligence
+    try {
+      if (ipIntelligenceService) {
+        const stats = ipIntelligenceService.getServiceStats();
+        health.services.ipIntelligence = 'Running';
+      } else {
+        health.services.ipIntelligence = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.ipIntelligence = 'Error';
+      isDegraded = true;
+    }
+
+    // Check Behavioral Biometric
+    try {
+      if (behavioralService) {
+        const stats = behavioralService.getServiceStats();
+        health.services.behavioralBiometric = 'Running';
+      } else {
+        health.services.behavioralBiometric = 'Not Configured';
+      }
+    } catch (error) {
+      health.services.behavioralBiometric = 'Error';
+      isDegraded = true;
+    }
+
+    if (isDegraded) {
+      health.status = 'Degraded';
+    }
+
+    return res.status(isDegraded ? 200 : 200).json(health); // Reporting degraded status still returns 200 for status page transparency
+  });
+
   app.use((req, res) => res.status(404).json({ success: false, error: 'Not found' }));
+
+  // Global error handler with Sentry integration
+  app.use((err, req, res, next) => {
+    // Log error with structured logging
+    const errorContext = {
+      traceId: req.logger?.fields?.traceId,
+      method: req.method,
+      path: req.path,
+      walletAddress: req.user?.publicKey || req.body?.walletAddress,
+      endpoint: req.originalUrl,
+    };
+
+    // Capture with Sentry
+    errorTracking.captureException(err, errorContext);
+
+    // Return error response
+    res.status(err.statusCode || err.status || 500).json({
+      success: false,
+      error: process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
+        : err.message,
+      ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+    });
+  });
 
   return app;
 }
 
-/**
- * Read a bearer token from the request.
- *
- * @param {import('express').Request} req The current request.
- * @returns {string|null}
- */
+// ── Private helpers ────────────────────────────────────────────────────────
+
 function extractToken(req) {
   const authHeader = req.headers.authorization || '';
-
-  if (authHeader.startsWith('Bearer ')) {
-    return authHeader.slice('Bearer '.length).trim();
-  }
-
+  if (authHeader.startsWith('Bearer ')) return authHeader.slice('Bearer '.length).trim();
   return req.query.token || req.body?.token || null;
 }
 
-/**
- * Build creator auth middleware from the configured auth service.
- *
- * @param {CreatorAuthService} creatorAuthService Authentication service.
- * @returns {import('express').RequestHandler}
- */
 function requireCreatorAuth(creatorAuthService) {
   return (req, res, next) => {
     const token = extractToken(req);
-
     if (!token) {
       return res.status(401).json({ success: false, error: 'Authentication required' });
     }
-
     try {
       req.creator = creatorAuthService.verifyToken(token);
       return next();
@@ -410,38 +771,21 @@ function requireCreatorAuth(creatorAuthService) {
   };
 }
 
-/**
- * Normalize scalar request values to strings for durable storage.
- *
- * @param {string|number|boolean} value The value to normalize.
- * @returns {string}
- */
 function normalizeScalar(value) {
   return String(value).trim();
 }
 
-/**
- * Check whether a value is present in a request body.
- *
- * @param {unknown} value Value to inspect.
- * @returns {boolean}
- */
 function isPresent(value) {
   return value !== undefined && value !== null && String(value).trim() !== '';
 }
 
-/**
- * Send a consistent JSON error payload for creator actions.
- *
- * @param {import('express').Response} res The response object.
- * @param {Error & {statusCode?: number}} error The thrown error.
- * @returns {import('express').Response}
- */
 function handleActionError(res, error) {
   return res
     .status(error.statusCode || 500)
     .json({ success: false, error: error.message || 'Request failed' });
 }
+
+// ── Bootstrap ──────────────────────────────────────────────────────────────
 
 const app = createApp();
 const port = Number(process.env.PORT || 3000);
@@ -548,3 +892,5 @@ if (require.main === module) {
 
 module.exports = app;
 module.exports.createApp = createApp;
+module.exports.createApp = createApp;
+

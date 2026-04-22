@@ -1,13 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const contentService = require('../services/contentService');
-const { authenticateToken, requireTier } = require('../middleware/auth');
+const { authenticateToken, requireTierUnified, getUserId } = require('../middleware/unifiedAuth');
 
 // Get content by ID with tier-based filtering
 router.get('/:contentId', authenticateToken, (req, res) => {
   try {
     const { contentId } = req.params;
-    const content = contentService.getContent(contentId, req.user.address);
+    const content = contentService.getContent(contentId, getUserId(req.user));
     
     res.json({
       success: true,
@@ -28,12 +28,13 @@ router.get('/', authenticateToken, (req, res) => {
   try {
     const filters = {
       creator: req.query.creator,
-      tags: req.query.tags ? req.query.tags.split(',') : [],
-      search: req.query.search,
-      tier: req.query.tier
+      tier: req.query.tier,
+      tags: req.query.tags ? req.query.tags.split(',') : undefined,
+      userAddress: getUserId(req.user),
+      search: req.query.search
     };
 
-    const contentList = contentService.listContent(req.user.address, filters);
+    const contentList = contentService.listContent(getUserId(req.user), filters);
     
     res.json({
       success: true,
@@ -52,7 +53,7 @@ router.get('/', authenticateToken, (req, res) => {
 });
 
 // Create new content (creator only)
-router.post('/', authenticateToken, requireTier('bronze'), (req, res) => {
+router.post('/', authenticateToken, requireTierUnified('bronze'), (req, res) => {
   try {
     const {
       title,
@@ -79,7 +80,7 @@ router.post('/', authenticateToken, requireTier('bronze'), (req, res) => {
       duration: parseFloat(duration),
       price,
       tags: tags || []
-    }, req.user.address);
+    }, getUserId(req.user));
 
     res.status(201).json({
       success: true,
@@ -105,7 +106,7 @@ router.put('/:contentId', authenticateToken, (req, res) => {
     delete updates.creator;
     delete updates.createdAt;
 
-    const updatedContent = contentService.updateContent(contentId, updates, req.user.address);
+    const updatedContent = contentService.updateContent(contentId, updates, getUserId(req.user));
     
     res.json({
       success: true,
@@ -126,7 +127,7 @@ router.delete('/:contentId', authenticateToken, (req, res) => {
   try {
     const { contentId } = req.params;
     
-    contentService.deleteContent(contentId, req.user.address);
+    contentService.deleteContent(contentId, getUserId(req.user));
     
     res.json({
       success: true,
@@ -146,13 +147,13 @@ router.delete('/:contentId', authenticateToken, (req, res) => {
 router.get('/:contentId/access', authenticateToken, (req, res) => {
   try {
     const { contentId } = req.params;
-    const canAccess = contentService.canAccessContent(contentId, req.user.address);
+    const canAccess = contentService.canAccessContent(contentId, getUserId(req.user));
     
     res.json({
       success: true,
       contentId,
       canAccess,
-      userTier: contentService.getUserTier(req.user.address)
+      userTier: contentService.getUserTier(getUserId(req.user))
     });
 
   } catch (error) {
@@ -168,7 +169,7 @@ router.get('/:contentId/access', authenticateToken, (req, res) => {
 router.get('/creator/:creatorAddress/stats', authenticateToken, (req, res) => {
   try {
     const { creatorAddress } = req.params;
-    const stats = contentService.getCreatorStats(creatorAddress, req.user.address);
+    const stats = contentService.getCreatorStats(creatorAddress, getUserId(req.user));
     
     res.json({
       success: true,
@@ -188,7 +189,7 @@ router.get('/creator/:creatorAddress/stats', authenticateToken, (req, res) => {
 // Get upgrade suggestions for user
 router.get('/upgrade/suggestions', authenticateToken, (req, res) => {
   try {
-    const suggestions = contentService.getUpgradeSuggestions(req.user.address);
+    const suggestions = contentService.getUpgradeSuggestions(getUserId(req.user));
     
     res.json({
       success: true,
@@ -220,10 +221,11 @@ router.get('/tier/:tierName', authenticateToken, (req, res) => {
 
     const filters = {
       ...req.query,
-      requiredTier: tierName
+      requiredTier: tierName,
+      userAddress: getUserId(req.user)
     };
 
-    const contentList = contentService.listContent(req.user.address, filters);
+    const contentList = contentService.listContent(getUserId(req.user), filters);
     
     res.json({
       success: true,
@@ -255,14 +257,17 @@ router.post('/search', authenticateToken, (req, res) => {
 
     const searchFilters = {
       ...filters,
-      search: query
+      search: query,
+      userAddress: getUserId(req.user)
     };
 
-    const results = contentService.listContent(req.user.address, searchFilters);
+    const results = contentService.listContent(getUserId(req.user), searchFilters);
     
     res.json({
       success: true,
       query,
+      filters,
+      userAddress: getUserId(req.user),
       results,
       count: results.length
     });
@@ -279,8 +284,8 @@ router.post('/search', authenticateToken, (req, res) => {
 // Get user's accessible content summary
 router.get('/user/summary', authenticateToken, (req, res) => {
   try {
-    const userTier = contentService.getUserTier(req.user.address);
-    const allContent = contentService.listContent(req.user.address);
+    const userTier = contentService.getUserTier(getUserId(req.user));
+    const allContent = contentService.listContent(getUserId(req.user));
     
     const summary = {
       userTier,

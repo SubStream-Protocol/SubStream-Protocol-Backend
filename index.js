@@ -33,6 +33,7 @@ const { BackgroundWorkerService } = require('./src/services/backgroundWorkerServ
 const { GlobalStatsService } = require('./src/services/globalStatsService');
 const GlobalStatsWorker = require('./src/services/globalStatsWorker');
 const CollaborationRevenueService = require('./services/collaborationRevenueService');
+const { SorobanDeadLetterQueue } = require('./src/services/sorobanDeadLetterQueue');
 const CollaborationWatchTimeMiddleware = require('./middleware/collaborationWatchTime');
 const createVideoRoutes = require('./routes/video');
 const createGlobalStatsRouter = require('./routes/globalStats');
@@ -609,6 +610,25 @@ function createApp(dependencies = {}) {
       ipMonitoringService
     }));
   }
+
+  // Initialize DLQ service
+  let dlqService = null;
+  try {
+    dlqService = new SorobanDeadLetterQueue(config, {
+      logger,
+      database,
+      alertService: null // TODO: Add alert service integration
+    });
+    await dlqService.initialize();
+    app.set('dlqService', dlqService);
+    app.locals.dlqService = dlqService;
+  } catch (error) {
+    logger.error('Failed to initialize DLQ service', { error: error.message });
+  }
+
+  // DLQ management routes (admin only)
+  const dlqAdminRoutes = require('./routes/admin/dlq');
+  app.use('/admin/dlq', dlqAdminRoutes);
 
   // Behavioral biometric management routes
   if (behavioralService) {

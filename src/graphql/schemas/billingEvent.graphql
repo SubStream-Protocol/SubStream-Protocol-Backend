@@ -1,0 +1,122 @@
+# BillingEvent represents a billing transaction or event
+type BillingEvent {
+  id: ID!
+  merchant: Merchant!
+  subscription: Subscription
+  plan: Plan
+  amount: Float!
+  currency: String!
+  eventType: BillingEventType!
+  status: BillingEventStatus!
+  description: String
+  metadata: JSON!
+  createdAt: String!
+  updatedAt: String!
+  processedAt: String
+}
+
+enum BillingEventType {
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_RENEWAL
+  SUBSCRIPTION_UPGRADED
+  SUBSCRIPTION_DOWNGRADED
+  SUBSCRIPTION_CANCELLED
+  REFUND
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  CHARGEBACK
+  ADJUSTMENT
+}
+
+enum BillingEventStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+scalar JSON
+
+type BillingEventConnection {
+  nodes: [BillingEvent!]!
+  totalCount: Int!
+  pageInfo: PageInfo!
+}
+
+type Query {
+  # Get a single billing event
+  billingEvent(id: ID!): BillingEvent
+  
+  # List billing events for a merchant
+  billingEventsByMerchant(
+    merchantId: ID!
+    status: BillingEventStatus
+    eventType: BillingEventType
+    startDate: String
+    endDate: String
+    limit: Int = 50
+    offset: Int = 0
+  ): BillingEventConnection!
+  
+  # List billing events for a subscription
+  billingEventsBySubscription(
+    subscriptionId: ID!
+    limit: Int = 50
+    offset: Int = 0
+  ): BillingEventConnection!
+  
+  # Get billing summary for a merchant
+  merchantBillingStats(
+    merchantId: ID!
+    startDate: String
+    endDate: String
+  ): BillingStats!
+}
+
+type BillingStats {
+  merchant: Merchant!
+  totalRevenue: Float!
+  totalEvents: Int!
+  successfulPayments: Int!
+  failedPayments: Int!
+  refunds: Float!
+  averageTransactionValue: Float!
+  topEventTypes: [EventTypeCount!]!
+}
+
+type EventTypeCount {
+  eventType: BillingEventType!
+  count: Int!
+  amount: Float!
+}
+
+type Mutation {
+  # Create a billing event
+  createBillingEvent(input: CreateBillingEventInput!): BillingEvent!
+  
+  # Update billing event status
+  updateBillingEventStatus(id: ID!, status: BillingEventStatus!): BillingEvent!
+  
+  # Record a refund
+  refundBillingEvent(id: ID!, reason: String): BillingEvent!
+}
+
+input CreateBillingEventInput {
+  merchantId: ID!
+  subscriptionId: ID
+  planId: ID
+  amount: Float!
+  currency: String = "USD"
+  eventType: BillingEventType!
+  description: String
+  metadata: JSON
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}

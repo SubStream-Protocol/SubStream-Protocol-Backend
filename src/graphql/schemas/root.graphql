@@ -1,0 +1,54 @@
+# Root schema combining all domain schemas
+schema {
+  query: Query
+  mutation: Mutation
+}
+
+# Merged Query type
+type Query {
+  # Merchant queries
+  merchant(id: ID!): Merchant
+  merchantByWallet(walletAddress: String!): Merchant
+  merchants(limit: Int = 50, offset: Int = 0, sortBy: String = "createdAt", sortOrder: String = "DESC"): MerchantConnection!
+  merchantDashboard(id: ID!): MerchantDashboard!
+  
+  # Subscription queries
+  subscription(id: ID!): Subscription
+  subscriptions(merchantId: ID!, status: SubscriptionStatus, limit: Int = 50, offset: Int = 0): SubscriptionConnection!
+  mySubscriptions(subscriberWallet: String!, limit: Int = 50, offset: Int = 0): SubscriptionConnection!
+  hasActiveSubscription(merchantId: ID!, subscriberWallet: String!): Boolean!
+  
+  # Plan queries
+  plan(id: ID!): Plan
+  plansByMerchant(merchantId: ID!, active: Boolean = true, limit: Int = 50, offset: Int = 0): PlanConnection!
+  plans(limit: Int = 50, offset: Int = 0, sortBy: String = "createdAt", sortOrder: String = "DESC"): PlanConnection!
+  
+  # Billing Event queries
+  billingEvent(id: ID!): BillingEvent
+  billingEventsByMerchant(merchantId: ID!, status: BillingEventStatus, eventType: BillingEventType, startDate: String, endDate: String, limit: Int = 50, offset: Int = 0): BillingEventConnection!
+  billingEventsBySubscription(subscriptionId: ID!, limit: Int = 50, offset: Int = 0): BillingEventConnection!
+  merchantBillingStats(merchantId: ID!, startDate: String, endDate: String): BillingStats!
+}
+
+# Merged Mutation type
+type Mutation {
+  # Merchant mutations
+  createMerchant(input: CreateMerchantInput!): Merchant!
+  updateMerchant(id: ID!, input: UpdateMerchantInput!): Merchant!
+  
+  # Subscription mutations
+  createSubscription(input: CreateSubscriptionInput!): Subscription!
+  updateSubscription(id: ID!, input: UpdateSubscriptionInput!): Subscription!
+  cancelSubscription(id: ID!): Subscription!
+  
+  # Plan mutations
+  createPlan(input: CreatePlanInput!): Plan!
+  updatePlan(id: ID!, input: UpdatePlanInput!): Plan!
+  deactivatePlan(id: ID!): Plan!
+  activatePlan(id: ID!): Plan!
+  
+  # Billing Event mutations
+  createBillingEvent(input: CreateBillingEventInput!): BillingEvent!
+  updateBillingEventStatus(id: ID!, status: BillingEventStatus!): BillingEvent!
+  refundBillingEvent(id: ID!, reason: String): BillingEvent!
+}

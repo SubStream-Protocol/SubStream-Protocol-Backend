@@ -1,0 +1,85 @@
+# Merchant represents a creator/merchant in the SubStream ecosystem
+type Merchant {
+  id: ID!
+  walletAddress: String!
+  displayName: String
+  email: String
+  createdAt: String!
+  updatedAt: String!
+  
+  # Nested relationships
+  subscriptions: [Subscription!]!
+  plans: [Plan!]!
+  billingEvents: [BillingEvent!]!
+  subscriptionCount: Int!
+  activeSubscriptionCount: Int!
+  totalRevenue: Float!
+}
+
+# Query root for merchants
+type Query {
+  # Get a single merchant by ID
+  merchant(id: ID!): Merchant
+  
+  # Get a single merchant by wallet address
+  merchantByWallet(walletAddress: String!): Merchant
+  
+  # List all merchants with optional filtering
+  merchants(
+    limit: Int = 50
+    offset: Int = 0
+    sortBy: String = "createdAt"
+    sortOrder: String = "DESC"
+  ): MerchantConnection!
+  
+  # Get merchant dashboard data (primary use case for frontend)
+  merchantDashboard(id: ID!): MerchantDashboard!
+}
+
+type MerchantConnection {
+  nodes: [Merchant!]!
+  totalCount: Int!
+  pageInfo: PageInfo!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type MerchantDashboard {
+  merchant: Merchant!
+  stats: MerchantStats!
+  recentSubscriptions: [Subscription!]!
+  recentBillingEvents: [BillingEvent!]!
+}
+
+type MerchantStats {
+  totalSubscribers: Int!
+  activeSubscribers: Int!
+  totalRevenue: Float!
+  monthlyRevenue: Float!
+  averageSubscriptionValue: Float!
+  churnRate: Float!
+}
+
+type Mutation {
+  # Create a new merchant
+  createMerchant(input: CreateMerchantInput!): Merchant!
+  
+  # Update merchant details
+  updateMerchant(id: ID!, input: UpdateMerchantInput!): Merchant!
+}
+
+input CreateMerchantInput {
+  walletAddress: String!
+  displayName: String
+  email: String
+}
+
+input UpdateMerchantInput {
+  displayName: String
+  email: String
+}

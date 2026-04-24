@@ -1,0 +1,96 @@
+# Plan represents a subscription plan offered by a merchant
+type Plan {
+  id: ID!
+  merchant: Merchant!
+  name: String!
+  description: String
+  price: Float!
+  currency: String!
+  billingCycle: BillingCycle!
+  features: [String!]!
+  maxSubscribers: Int
+  active: Boolean!
+  createdAt: String!
+  updatedAt: String!
+  
+  # Nested relationships
+  subscriptions: [Subscription!]!
+  billingEvents: [BillingEvent!]!
+  subscriptionCount: Int!
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+  ONE_TIME
+  DAILY
+  WEEKLY
+}
+
+type PlanConnection {
+  nodes: [Plan!]!
+  totalCount: Int!
+  pageInfo: PageInfo!
+}
+
+type Query {
+  # Get a single plan by ID
+  plan(id: ID!): Plan
+  
+  # List all plans for a merchant
+  plansByMerchant(
+    merchantId: ID!
+    active: Boolean = true
+    limit: Int = 50
+    offset: Int = 0
+  ): PlanConnection!
+  
+  # List all plans in the system (admin)
+  plans(
+    limit: Int = 50
+    offset: Int = 0
+    sortBy: String = "createdAt"
+    sortOrder: String = "DESC"
+  ): PlanConnection!
+}
+
+type Mutation {
+  # Create a new plan
+  createPlan(input: CreatePlanInput!): Plan!
+  
+  # Update an existing plan
+  updatePlan(id: ID!, input: UpdatePlanInput!): Plan!
+  
+  # Deactivate a plan
+  deactivatePlan(id: ID!): Plan!
+  
+  # Activate a plan
+  activatePlan(id: ID!): Plan!
+}
+
+input CreatePlanInput {
+  merchantId: ID!
+  name: String!
+  description: String
+  price: Float!
+  currency: String = "USD"
+  billingCycle: BillingCycle!
+  features: [String!]
+  maxSubscribers: Int
+}
+
+input UpdatePlanInput {
+  name: String
+  description: String
+  price: Float
+  features: [String!]
+  maxSubscribers: Int
+  active: Boolean
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}

@@ -1,0 +1,96 @@
+# Subscription represents a user's subscription to a merchant
+type Subscription {
+  id: ID!
+  merchant: Merchant!
+  subscriberWallet: String!
+  plan: Plan
+  active: Boolean!
+  subscribedAt: String!
+  unsubscribedAt: String
+  expiresAt: String
+  
+  # Device and fraud detection
+  deviceId: String
+  deviceFingerprint: String
+  sybilRiskScore: Int
+  sybilFlagged: Boolean!
+  
+  # Latest billing event for this subscription
+  latestBillingEvent: BillingEvent
+  
+  # All billing events for this subscription
+  billingEvents: [BillingEvent!]!
+  
+  # Subscription status
+  status: SubscriptionStatus!
+  daysRemaining: Int
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+  PENDING
+  CANCELLED
+}
+
+type SubscriptionConnection {
+  nodes: [Subscription!]!
+  totalCount: Int!
+  pageInfo: PageInfo!
+}
+
+type Query {
+  # Get subscription by ID
+  subscription(id: ID!): Subscription
+  
+  # List subscriptions for a merchant
+  subscriptions(
+    merchantId: ID!
+    status: SubscriptionStatus
+    limit: Int = 50
+    offset: Int = 0
+  ): SubscriptionConnection!
+  
+  # List subscriptions for a subscriber
+  mySubscriptions(
+    subscriberWallet: String!
+    limit: Int = 50
+    offset: Int = 0
+  ): SubscriptionConnection!
+  
+  # Check if a subscriber has active subscription to a merchant
+  hasActiveSubscription(merchantId: ID!, subscriberWallet: String!): Boolean!
+}
+
+type Mutation {
+  # Create a new subscription
+  createSubscription(input: CreateSubscriptionInput!): Subscription!
+  
+  # Update subscription
+  updateSubscription(id: ID!, input: UpdateSubscriptionInput!): Subscription!
+  
+  # Cancel subscription
+  cancelSubscription(id: ID!): Subscription!
+}
+
+input CreateSubscriptionInput {
+  merchantId: ID!
+  subscriberWallet: String!
+  planId: ID
+  deviceId: String
+  deviceFingerprint: String
+}
+
+input UpdateSubscriptionInput {
+  planId: ID
+  active: Boolean
+  daysToExpire: Int
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}

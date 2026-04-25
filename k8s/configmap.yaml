@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: substream-config
+  namespace: substream
+  labels:
+    app: substream-backend
+data:
+  # S3 Configuration
+  s3-bucket: "substream-exports"
+  s3-region: "us-east-1"
+  
+  # Soroban Configuration
+  soroban-rpc-url: "https://rpc.mainnet.stellar.org"
+  soroban-network-passphrase: "Public Global Stellar Network ; September 2015"
+  soroban-contract-id: "CAOUX2FZ65IDC4F2X7LJJ2SVF23A35CCTZB7KVVN475JCLKTTU4CEY6L"
+  
+  # Application Configuration
+  log-level: "info"
+  cors-origins: "https://app.substream.app,https://admin.substream.app"
+  
+  # Feature Flags
+  enable-data-export: "true"
+  enable-feature-flags: "true"
+  enable-websocket-rate-limiting: "true"
+  
+  # Rate Limiting Configuration
+  ws-max-connections-per-ip: "5"
+  ws-max-connections-per-tenant: "10"
+  ws-max-messages-per-second: "10"
+  
+  # Data Export Configuration
+  export-rate-limit-days: "7"
+  export-max-file-size-mb: "100"
+  export-timeout-minutes: "30"
+  
+  # Cache Configuration
+  redis-cache-ttl: "300"
+  feature-flag-cache-ttl: "300"
+  
+  # Monitoring Configuration
+  enable-metrics: "true"
+  metrics-path: "/metrics"
+  
+  # Security Configuration
+  enable-security-headers: "true"
+  session-timeout-minutes: "30"
+  
+  # Email Configuration (for export notifications)
+  email-from: "noreply@substream.app"
+  email-provider: "ses"

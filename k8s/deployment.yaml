@@ -1,0 +1,214 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: substream-backend
+  namespace: substream
+  labels:
+    app: substream-backend
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: substream-backend
+  template:
+    metadata:
+      labels:
+        app: substream-backend
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+      - name: substream-backend
+        image: substream/backend:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: DATABASE_FILENAME
+          value: "/app/data/substream.db"
+        - name: REDIS_HOST
+          value: "redis-service"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: substream-secrets
+              key: redis-password
+        - name: S3_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: substream-config
+              key: s3-bucket
+        - name: S3_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: substream-config
+              key: s3-region
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: substream-secrets
+              key: s3-access-key-id
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: substream-secrets
+              key: s3-secret-access-key
+        - name: CREATOR_AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: substream-secrets
+              key: creator-auth-secret
+        - name: SOROBAN_RPC_URL
+          valueFrom:
+            configMapKeyRef:
+              name: substream-config
+              key: soroban-rpc-url
+        - name: SOROBAN_NETWORK_PASSPHRASE
+          valueFrom:
+            configMapKeyRef:
+              name: substream-config
+              key: soroban-network-passphrase
+        - name: SOROBAN_CONTRACT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: substream-config
+              key: soroban-contract-id
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+        - name: tmp-volume
+          mountPath: /tmp
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: substream-data-pvc
+      - name: tmp-volume
+        emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      schedulerName: default-scheduler
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: substream-backend-service
+  namespace: substream
+  labels:
+    app: substream-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 3000
+    protocol: TCP
+    name: http
+  selector:
+    app: substream-backend
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: substream-data-pvc
+  namespace: substream
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: substream-backend-hpa
+  namespace: substream
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: substream-backend
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Max

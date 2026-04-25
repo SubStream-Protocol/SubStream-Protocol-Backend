@@ -44,6 +44,40 @@ interface TrialConvertedPayload {
   timestamp: string;
 }
 
+interface MRRUpdatePayload {
+  creator_id: string;
+  payload: {
+    type: string;
+    metrics: {
+      total_mrr: number;
+      active_subscribers: number;
+      currency: string;
+      mrr_gained_today: number;
+      mrr_lost_to_churn: number;
+      churn_rate: number;
+      average_revenue_per_user: number;
+    };
+    deltas: {
+      mrr: {
+        previous: number;
+        current: number;
+        change: number;
+        change_percent: number;
+      };
+      subscribers: {
+        previous: number;
+        current: number;
+        change: number;
+      };
+    };
+    breakdowns: {
+      by_plan: any[];
+      by_cohort: any[];
+      recent_activity: any[];
+    };
+  };
+}
+
 @WS_Gateway({
   cors: {
     origin: process.env.CORS_ORIGIN || '*',
@@ -191,6 +225,18 @@ export class WebSocketGateway
     await this.redisService.publish('trial_converted', payload);
   }
 
+  // MRR update event handler
+  async handleMRRUpdate(payload: MRRUpdatePayload) {
+    this.logger.log(`MRR update for merchant: ${payload.creator_id}`);
+    
+    // Emit to specific merchant room
+    this.server.to(payload.creator_id).emit('mrr_update', {
+      type: 'mrr_update',
+      data: payload.payload,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   private setupHeartbeat(client: SocketWithAuth) {
     const interval = setInterval(() => {
       // Check if token is still valid
@@ -259,6 +305,11 @@ export class WebSocketGateway
         data: payload,
         timestamp: new Date().toISOString(),
       });
+    });
+
+    // Subscribe to MRR update events
+    this.redisService.subscribe('mrr_update', (payload: MRRUpdatePayload) => {
+      this.handleMRRUpdate(payload);
     });
   }
 

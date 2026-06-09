@@ -35,7 +35,7 @@ const mockDatabase = {
         { id: 'creator2', subscriber_count: 80, video_count: 8, latest_video_date: '2024-01-14T15:30:00Z' }
       ])
     }))
-  })
+  }
 };
 
 describe('GlobalStatsService', () => {

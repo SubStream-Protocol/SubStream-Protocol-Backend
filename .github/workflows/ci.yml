@@ -1,0 +1,30 @@
+name: CI - Unit Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.11.0'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run unit tests
+        run: npx jest --forceExit --silent --testPathIgnorePatterns='(tests/|test/)'
+        env:
+          NODE_ENV: test
+          DATABASE_FILENAME: ':memory:'
+          JWT_SECRET: test-jwt-secret
